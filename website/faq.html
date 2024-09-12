@@ -40,8 +40,8 @@
                 <li><a href="index.html">Home</a></li>
                 <li><a href="features.html">Features</a></li>
                 <li><a href="download.html">Download</a></li>
-                <li><a href="http://docs.slimerjs.org">Documentation</a></li>
-                <li><a href="http://github.com/laurentj/slimerjs">Source Code</a></li>
+                <li><a href="https://docs.slimerjs.org">Documentation</a></li>
+                <li><a href="https://github.com/laurentj/slimerjs">Source Code</a></li>
                 <li class="active"><a href="faq.html">FAQ</a></li>
                 <li><a href="community.html">Community</a></li>
                 <li><a href="about.html">About</a></li>
@@ -75,34 +75,45 @@
               <h1>title</h1>
             </div-->
 
-<p>General FAQ. For the technical FAQ, <a href="http://docs.slimerjs.org/current/faq.html">see the manual</a>.</p>
+<p>General FAQ. For the technical FAQ, <a href="https://docs.slimerjs.org/current/faq.html">see the manual</a>.</p>
 
 <dl id="faq">
-    <dt id="why-not-headless">Why is it not natively headless?</dt>
+    <dt id="why-not-headless">Is it really natively headless?</dt>
     <dd>You see windows during the execution of your script? It's normal.
-        Gecko, the rendering engine of Firefox, cannot render web content without a
-        graphical window.<br />
-        You can launch <span class="slm">SlimerJS</span> with xvfb if you are under
-        linux or MacOSx, to have a headless <span class="slm">SlimerJS</span>.<br/>
-        <a href="https://github.com/laurentj/slimerjs/issues/80">There is a hope</a>
-        for future release of SlimerJS, with latest improvements made in Gecko.
+        Until Firefox 56, Gecko, the rendering engine of Firefox, couldn't render web
+        content without a graphical window.<br />
+        With Firefox 56+, you can launch a headless <span class="slm">SlimerJS</span> by adding a
+        <code>--headless</code> flag on the command line. For older Firefox,
+        and only on Linux, you can launch <span class="slm">SlimerJS</span>
+        with xvfb. See <a href="https://docs.slimerjs.org/current/installation.html#having-a-headless-slimerjs">the
+            documentation about the headless mode</a>.
     </dd>
 
     <dt id="gecko">What is Gecko?</dt>
     <dd>Gecko is the core engine of Firefox.</dd>
 
     <dt id="firefox-compatibility">Which version of Firefox is SlimerJS compatible with?</dt>
-    <dd>It depends of the package you downloaded. If you chose
-        a package dedicated to a specific platform, <span class="slm">SlimerJS</span>
-        embeds Gecko 38. So it is compatible with Firefox 38.<br>
-        If you chose the lightweight package, it runs with <em>your</em> Firefox, so
-        it can run with any version since Firefox 20 (probably lower versions
-        but you could have some issues; Not tested).<br>Note that officially, SlimerJS
-        is only compatible with stable versions of Firefox.
+    <dd>It runs with Firefox 52 and higher versions.<br>Officially, SlimerJS
+        is only compatible with stable versions of Firefox until Firefox 59.
     </dd>
 
-    <dt id="firefox-unstable">Can SlimerJS be executed with unstable version of Firefox?</dt>
-    <dd>Yes, if you make some changes. This is explained <a href="http://docs.slimerjs.org/current/installation.html#using-unstable-version-or-very-old-versions-of-firefox-xulrunner">in the installation manual</a>.</dd>
+    <dt id="end-of-development">Why SlimerJS is not compatible with Firefox 60 and higher?</dt>
+    <dd>The Ghostbusters team of Mozilla decided to kill XUL extensions into Firefox some years ago, and so many
+        of internal API of Firefox became unstable. Then it became more and more difficult to update SlimerJS at each
+    new version of Firefox, as those internal API changed, disappeared etc. This ghost trap worked so well that at some
+        points, it even became  impossible to adapt SlimerJS without rewriting it entirely. Because of lack of time and motivation,
+    the main developer stopped the development of SlimerJS in 2018 and decided in 2021 to officially end the project.</dd>
+
+    <dt id="why-slimerjs-name">Why is it called "SlimerJs"?</dt>
+    <dd>Slimer is the name of a ghost in the movie "GhostBusters". As you may know, the Firefox
+        source code uses some references from this movie, and since PhantomJS,
+        CasperJs and other related tools, is a matter of... ghosts ;-)</dd>
+
+
+    <dt id="standalone-version">I don't find anymore the "Standalone" edition
+     like for SlimerJS 0.9. Where is it?</dt>
+    <dd>There are no more "standalone" edition, since Mozilla has ceased to build and maintain
+    XulRunner. There is only the "lightweight" edition.</dd>
 
     <dt id="launch-casperjs">Can CasperJS be launched with <span class="slm">SlimerJS</span>?</dt>
     <dd>Yes, since SlimerJS 0.8, and with CasperJS 1.1beta1 or higher.
@@ -110,16 +121,7 @@
         on the command line.
     </dd>
 
-    <dt id="why-slimerjs-name">Why is it called "SlimerJs"?</dt>
-    <dd>Slimer is the name of a ghost in the movie "GhostBusters". As you may know, the Firefox
-        source code uses some references from this movie, and since PhantomJS,
-        CasperJs and other related tools, is a matter of ghosts... ;-)</dd>
 
-    <dt>I found some English errors on the web site or in the documentation</dt>
-    <dd>Our apologies for that. English is not the mother tongue of the main author. And he
-        didn't work enough at school in English class :). However, he will be very happy
-        to receive your help to fix English errors. See below how to contribute :-)
-    </dd>
     <dt id="how-to-contribute">How can I contribute?</dt>
     <dd>
         You can contribute in many ways:
@@ -129,38 +131,33 @@
             <li>Improve the code by providing patches. <span class="slm">SlimerJS</span> is entirely in Javascript!!
             <a href="https://github.com/laurentj/slimerjs/blob/master/CONTRIBUTING.md">See instructions
             to contribute</a>.</li>
-            <li><a href="https://github.com/laurentj/slimerjs/tree/master/docs">Document the API</a>.
-                 The documentation is stored in the github repository.</li>
+            <li>Improve the <a href="https://github.com/laurentj/slimerjs/tree/master/docs">Documentation</a>.
+                 It is stored in the github repository.</li>
             <li><a href="https://github.com/laurentj/slimerjs/tree/master/website">Improve the web site</a>.
                  The web site is also stored in the github repository.</li>
-            <li>Other ideas? Discuss with us on the IRC channel or in the mailing list
+            <li>Other ideas? Discuss with us on the mailing list
              (<a href="community.html">see the community page</a>).</li>
         </ul>
     </dd>
 
     <dt id="nightlies">Is there a build of SlimerJS containing the latest improvements?</dt>
-    <dd>Yes, each day a build is made from the "master" branch and the stable branch
-    of the source code.
-    This is the nightly build. Since these are development versions don't use them
-    in production.<br>
+    <dd>Yes, each time a bug fix or an improvement is made
+    <a href="https://github.com/laurentj/slimerjs">in the repository of SlimerJS</a>,
+    a build is made. This is we call "nightly build". Since these are development
+    versions don't use them in production.<br>
     Download the archive
-    <a href="http://download.slimerjs.org/nightlies/latest-slimerjs-stable/">from the stable branch</a>
+    <a href="https://download.slimerjs.org/nightlies/latest-slimerjs-stable/">from the stable branch</a>
     (which contains only latest bug fixes) or
-    <a href="http://download.slimerjs.org/nightlies/latest-slimerjs-master/">from the master branch</a>
+    <a href="https://download.slimerjs.org/nightlies/latest-slimerjs-master/">from the master branch</a>
     (which contains latest improvements for the future major release).
-    You can view the documentation from the master branch <a href="http://docs.slimerjs.org/nightly/">online here</a>.
+    You can view the documentation from the master branch <a href="https://docs.slimerjs.org/nightly/">online here</a>.
     </dd>
 
     <dt>Why are there no tests on the WebServer object in the source code?</dt>
     <dd>This module is based on the
-        <a href="http://mxr.mozilla.org/mozilla-central/source/netwerk/test/httpserver/">httpd component</a>
+        <a href="https://dxr.mozilla.org/mozilla-central/source/netwerk/test/httpserver/">httpd component</a>
         of Mozilla used for their own unit tests, and that is already
-        <a href="http://mxr.mozilla.org/mozilla-central/source/netwerk/test/httpserver/test/">heavily tested</a></dd>
-
-    <dt>Why are there no tests on the FileSystem object in the source code?</dt>
-    <dd>This module is based on the
-        <a href="https://github.com/laurentj/addon-sdk/blob/master/lib/sdk/io/file.js">file module provided in the Mozilla Addons SDK</a>,
-        and <a href="https://github.com/laurentj/addon-sdk/blob/master/test/test-file.js">is already tested</a>.</dd>
+        <a href="https://dxr.mozilla.org/mozilla-central/source/netwerk/test/httpserver/test/">heavily tested</a></dd>
 
 </dl>
 
@@ -187,10 +184,10 @@
               <a href="https://groups.google.com/forum/#!forum/slimerjs"><img class="imgbtn" src="assets/img/tchat2.png"> Mail List</a> <span class="separator">//</span>
             </li>
             <li>
-              <a href="https://github.com/laurentj/slimerjs/issues"><img class="imgbtn" src="assets/img/bug_bleu.png"> Bug ? Ideas !</a>
+              <a href="https://github.com/laurentj/slimerjs/issues"><img class="imgbtn" src="assets/img/bug_bleu.png"> Bug? Ideas!</a>
             </li>
           </ul>
-          <p>Copyright 2013-2015 Laurent Jouanneau / Innophi - Design by <a href="http://www.3liz.com/">3Liz</a></p>
+          <p>Copyright 2013-2021 Laurent Jouanneau / <a href="http://innophi.com">Innophi</a> - Design by <a href="http://www.3liz.com/">3Liz</a></p>
       </div>
     </footer>
 

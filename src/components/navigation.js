@@ -28,7 +28,7 @@ Navigation.prototype = {
     // short shouldLoad(in unsigned long aContentType, in nsIURI aContentLocation,
     //                  in nsIURI aRequestOrigin, in nsISupports aContext,
     //                  in ACString aMimeTypeGuess, in nsISupports aExtra, in nsIPrincipal aRequestPrincipal);
-    shouldLoad : function(aContentType, aContentLocation, aRequestOrigin, aContext, aMimeTypeGuess, aExtra) {
+    shouldLoad : function(aContentType, aContentLocation, aRequestOrigin, aContext, aMimeTypeGuess, aExtra, aRequestPrincipal) {
         let result = Ci.nsIContentPolicy.ACCEPT;
 
         // ignore content that is not a document
@@ -48,13 +48,18 @@ Navigation.prototype = {
 
         //------ retrieve the corresponding webpage object
         let [webpage, navtype] = this._findWebpage(aContext);
-        if (!webpage)
+        if (!webpage) {
             return result;
+        }
 
         // call the navigationRequest callback
-        webpage.navigationRequested(aContentLocation.spec, navtype, !webpage.navigationLocked,
-                                    (Ci.nsIContentPolicy.TYPE_DOCUMENT == aContentType));
-
+        // before Fx53: aMimeTypeGuess was always empty
+        // between Fx53-Fx56 : shouldLoad is called twice for each url, on time with  aMimeTypeGuess, one time without
+        // since Fx57 : shouldLoad is again called only one time per URL. For the main page, without aMimeTypeGuess, for subpage, with  aMimeTypeGuess
+        if (geckoMajorVersion < 53  || geckoMajorVersion > 56 || !aMimeTypeGuess) {
+            webpage.navigationRequested(aContentLocation.spec, navtype, !webpage.navigationLocked,
+                (Ci.nsIContentPolicy.TYPE_DOCUMENT == aContentType));
+        }
 
         // if the navigation request is blocked, refuse the content
         if (webpage.navigationLocked) {

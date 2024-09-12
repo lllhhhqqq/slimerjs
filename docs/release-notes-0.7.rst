@@ -22,7 +22,7 @@ New API
 - Implementation of ``require.extensions``, to declare specific loaders corresponding to some file extensions
 - Implementation of ``phantom.defaultPageSettings``. Note that settings are not supported
   yet by the webpage module.
-- callbacks ``webpage.onLoadStarted`` and  ``webpage.onLoadFinished`` receive two additionnal
+- callbacks ``webpage.onLoadStarted`` and  ``webpage.onLoadFinished`` receive two additional
   parameters: the url that is loaded, and a boolean true if the loaded page is in a frame.
 - Support of ``webpage.onCallback`` and ``window.callPhantom()``
 - Support of ``webpage.onError``
@@ -42,7 +42,7 @@ Improvements
 - Issue #32: a new profile is created each time we launch SlimerJS, to not have preferences,
   cookies or other data created by a previous launch. It is still possible to use a
   permanent profile to keep data between two launchs.
-- new option on the commande line: --error-log-file=filename to log errors in a file
+- new option on the commande line: ``--error-log-file=filename`` to log errors in a file
 
 Fixed bugs
 ----------

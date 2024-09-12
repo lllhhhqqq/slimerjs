@@ -8,7 +8,7 @@ Cu.import('resource://slimerjs/slLauncher.jsm');
 Cu.import('resource://slimerjs/slUtils.jsm');
 Cu.import('resource://slimerjs/slConsole.jsm');
 Cu.import('resource://slimerjs/slConfiguration.jsm');
-Cu.import('resource://slimerjs/phantom.jsm');
+Cu.import('resource://slimerjs/slimer-sdk/phantom.jsm');
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
 Cu.import('resource://slimerjs/slPhantomJSKeyCode.jsm');
@@ -16,6 +16,7 @@ Cu.import('resource://slimerjs/slQTKeyCodeToDOMCode.jsm');
 Cu.import('resource://slimerjs/webpageUtils.jsm');
 Cu.import('resource://slimerjs/slCookiesManager.jsm');
 Cu.import('resource://slimerjs/slDebug.jsm');
+
 
 const de = Ci.nsIDocumentEncoder
 const {validateOptions} = require("sdk/deprecated/api-utils");
@@ -81,32 +82,27 @@ function _create(parentWebpageInfo) {
      * @param string file the file name associated to the source code
      */
     function evalInSandbox (src, file) {
-        if (!webPageSandbox)
+        if (!webPageSandbox) {
             webPageSandbox = new WeakMap();
+        }
         let win = getCurrentFrame();
-        if (!webPageSandbox.has(win))
+        if (!webPageSandbox.has(win)) {
             webPageSandbox.set(win, createSandBox(win));
+        }
         try {
             let res = Cu.evalInSandbox(src, webPageSandbox.get(win), 'ECMAv5', file, 1);
             // QWebFrame.evaluateJavascript() used by PhantomJS
             // always returns null when no value are returned by
             // the script.
-            if (res === undefined)
+            if (res === undefined) {
                 return null;
+            }
             return res;
         }
         catch(e) {
             if (webpage.onError) {
-                var err = getTraceException(e, '');
-                if (err[1]) {
-                    err[1].forEach(function(item){
-                        if ('line' in item)
-                            item.line = parseInt(item.line);
-                        item.file = item.sourceURL;
-                    })
-                }
-                else err[1] = [];
-                webpage.onError('Error: '+err[0], err[1]);
+                let [msg, stackRes] = getTraceException(e, '');
+                executePageListener(webpage, 'onError', ['Error: '+msg, stackRes]);
                 return null;
             }
             else {
@@ -134,7 +130,13 @@ function _create(parentWebpageInfo) {
                     if (!Array.isArray(args)) {
                         args = Array.prototype.slice.call(args);
                     }
-                    webpage.onConsoleMessage(args.join(' '), consoleEvent.lineNumber, consoleEvent.filename, consoleEvent.level, consoleEvent.functionName, consoleEvent.timeStamp);
+                    executePageListener(webpage, 'onConsoleMessage', [
+                        args.join(' '),
+                        consoleEvent.lineNumber,
+                        consoleEvent.filename,
+                        consoleEvent.level,
+                        consoleEvent.functionName,
+                        consoleEvent.timeStamp]);
                     return
                 }
                 return;
@@ -144,15 +146,18 @@ function _create(parentWebpageInfo) {
 
     /**
      * a listener for the console service, to track errors in the content window.
-     * Unfortunately, we don't have no way to retrieve the stack :-/
      */
     var jsErrorListener = {
         observe:function( aMessage ){
+            //dump(" ************** jsErrorListener\n");
             if (!webpage.onError)
                 return;
             try {
                 let msg = aMessage.QueryInterface(Ci.nsIScriptError);
-                //dump(" ************** jsErrorListener  on error:"+msg.message.substr(0,30)+ "("+msg.category+") f:"+msg.flags+" ow:"+msg.outerWindowID+" is:"+webpageUtils.isOurWindow(browser, msg.outerWindowID)+"\n")
+                /*dump(" on error:"+msg.errorMessage+
+                     "("+msg.category+") f:"+msg.flags
+                     +" ow:"+msg.outerWindowID
+                     +" is:"+webpageUtils.isOurWindow(browser, msg.outerWindowID)+"\n")*/
                 let frameUrl = webpageUtils.isOurWindow(browser, msg.outerWindowID);
                 if (msg instanceof Ci.nsIScriptError
                     && !(msg.flags & Ci.nsIScriptError.warningFlag)
@@ -160,19 +165,8 @@ function _create(parentWebpageInfo) {
                     && frameUrl
                     && msg.category == "content javascript"
                     ) {
-                    let col = 0;
-                    if ('columnNumber' in msg) {
-                        col = msg.columnNumber;
-                    }
-
-                    let stack = [];
-                    stack.push({
-                        file:(msg.sourceName === null? frameUrl:msg.sourceName),
-                        line: msg.lineNumber,
-                        column:col,
-                        'function':null
-                    })
-                    webpage.onError(msg.message, stack);
+                    let [m, stack] = getTraceException(msg, null);
+                    webpage.onError(msg.errorMessage, stack);
                 }
             }
             catch(e) {
@@ -217,14 +211,20 @@ function _create(parentWebpageInfo) {
             onResponse:  function(res) {
                 webpage.resourceReceived(res);
             },
+            onTimeout : function(res) {
+                webpage.resourceTimeout(res);
+            },
             onError:  function(err) {
                 webpage.resourceError(err);
             },
-            captureTypes: webpage.captureContent,
+            getCaptureTypes: function() {
+                return webpage.captureContent;
+            },
             onLoadStarted: function(url){
                 if (wycywigReg.test(url)) {
                     return;
                 }
+                privProp.loadingProgress = 0;
                 webpage.loadStarted(url, false);
             },
             onURLChanged: function(url){
@@ -246,11 +246,11 @@ function _create(parentWebpageInfo) {
                 // phantomjs call onInitialized not only at the page creation
                 // but also after the content loading.. don't know why.
                 // let's imitate it. Only after a success
-                if (success)
+                if (success) {
                     webpage.initialized();
+                }
             },
             onLoadFinished: function(url, success){
-                let channel = browser.docShell.currentDocumentChannel;
                 if (wycywigReg.test(url)) {
                     return;
                 }
@@ -274,6 +274,12 @@ function _create(parentWebpageInfo) {
                 }
                 if (!duringMainLoad)
                     webpage.loadFinished(success, url, true);
+            },
+            onProgressChange : function(url, aCurSelfProgress, aMaxSelfProgress, aCurTotalProgress, aMaxTotalProgress) {
+                if (wycywigReg.test(url)) {
+                    return;
+                }
+                privProp.loadingProgress = Math.round(aCurTotalProgress/aMaxTotalProgress)*100;
             }
         }
     }
@@ -290,20 +296,28 @@ function _create(parentWebpageInfo) {
             throw Cr.NS_NOINTERFACE;
         },
 
+        createContentWindow(aURI, aOpener, aWhere, aFlags, aTriggeringPrincipal) {
+            return this._openWindow(null, aOpener, aWhere, aFlags,
+                aTriggeringPrincipal);
+        },
+
         /**
          * called by nsContentTreeOwner::ProvideWindow
          * when a window should be opened (window.open is invoked by a web page)
-         * @param aURI in our case, it is always null
-         * @param aWhere nsIBDW.OPEN_DEFAULTWINDOW, OPEN_CURRENTWINDOW OPEN_NEWWINDOW OPEN_NEWTAB OPEN_SWITCHTAB
-         * @param aContext nsIBDW.OPEN_EXTERNAL (external app which ask to open the url), OPEN_NEW
-         * @return the nsIDOMWindow object where to load the URI
+         * @param {nsIURI}  aURI in our case, it is always null
+         * @param {nsIDOMWindow} aOpener
+         * @param {int} aWhere nsIBDW.OPEN_DEFAULTWINDOW, OPEN_CURRENTWINDOW OPEN_NEWWINDOW OPEN_NEWTAB OPEN_SWITCHTAB
+         * @param {int} aContext nsIBDW.OPEN_EXTERNAL (external app which ask to open the url), OPEN_NEW
+         * @return {nsIDOMWindow} the  object where to load the URI
          */
-        openURI : function(aURI, aOpener, aWhere, aContext)
-        {
+        openURI : function(aURI, aOpener, aWhere, aFlags, aTriggeringPrincipal) {
+            return this._openWindow(aURI, aOpener, aWhere, aFlags, aTriggeringPrincipal);
+        },
+
+        _openWindow: function(aURI, aOpener, aWhere, aFlags, aTriggeringPrincipal) {
             // create the webpage object for this child window
             let opener = (webpage.ownsPages?aOpener:null);
             let parentWPInfo = null;
-            let childPage, win;
             if (webpage.ownsPages) {
                 parentWPInfo = {
                     window: opener,
@@ -315,10 +329,10 @@ function _create(parentWebpageInfo) {
                     }
                 }
             }
-            [childPage, win] = _create(parentWPInfo);
-
-            if (webpage.ownsPages)
+            let [childPage, win] = _create(parentWPInfo);
+            if (webpage.ownsPages) {
                 privProp.childWindows.push(childPage);
+            }
 
             // call the callback
             webpage.rawPageCreated(childPage);
@@ -326,17 +340,40 @@ function _create(parentWebpageInfo) {
             // returns the contentWindow of the browser element
             // nsContentTreeOwner::ProvideWindow and other will
             // load the expected URI into it.
-            return win.content;
+            if (geckoMajorVersion <= 53) {
+                // win.content is null in Firefox 53+
+                // we could return win.browser.contentWindow but it crashes in Fx53.
+                return win.content;
+            }
+            return win.browser.contentWindow;
         },
 
-        openURIInFrame : function(aURI, aOpener, aWhere, aContext) {
+        /**
+         *
+         * @param {nsIURI} aURI
+         * @param {nsIOpenURIInFrameParams} aParams
+         * @param {int} aWhere
+         * @param {int} aFlags
+         * @param {int} aNextTabParentId
+         * @param {string} aName
+         * @return {nsIFrameLoaderOwner}
+         */
+        openURIInFrame : function(aURI, aParams, aWhere, aFlags, aNextTabParentId, aName) {
             return null;
         },
 
         isTabContentWindow : function(aWindow) {
             return false;
+        },
+        createContentWindowInFrame: function (aURI, aParams, aWhere, aFlags, aNextTabParentId, aName) {
+            return null;
+        },
+
+        canClose : function() {
+            let {BrowserUtils} = Cu.import("resource://gre/modules/BrowserUtils.jsm", {});
+            return BrowserUtils.canCloseWindow(browser.ownerDocument.defaultView);
         }
-    }
+    };
 
     /**
      * some private parameters
@@ -346,10 +383,17 @@ function _create(parentWebpageInfo) {
         framePath : [],
         childWindows : [], // list of webpage of child windows
         settings: {},
-        viewportSize : { width: 400, height: 300},
+        viewportSize : {},
         staticContentLoading : false,
-        paperSize : null
+        paperSize : null,
+        loadingProgress : 0
     }
+
+    var unicodeConverter = null;
+
+    let defaultViewportSize = slConfiguration.getDefaultViewportSize();
+    privProp.viewportSize.width = defaultViewportSize.width;
+    privProp.viewportSize.height = defaultViewportSize.height;
 
     let defaultSettings = slConfiguration.getDefaultWebpageConfig();
     for (let p in defaultSettings) {
@@ -423,6 +467,36 @@ function _create(parentWebpageInfo) {
         return [webpage, win];
     }
 
+    function prepareJSEval(func, args) {
+
+        if (!(func instanceof Function
+              || typeof func === 'function'
+              || typeof func === 'string'
+              || func instanceof String)) {
+            return false;
+        }
+
+        let argsList = args.map(
+            function(arg){
+                  let type = typeof arg;
+                  switch(type) {
+                      case 'object':
+                          if (!arg || arg instanceof RegExp) {
+                              return ""+arg;
+                          }
+                      case 'array':
+                      case 'string':
+                          return JSON.stringify(arg);
+                      case "date":
+                          return "new Date(" + JSON.stringify(arg) + ")";
+                      default:
+                          return ""+arg
+                  }
+            });
+
+        return '('+func.toString()+').apply(this, [' + argsList.join(",") + ']);';
+    }
+
     // ----------------------------------- webpage
 
     /**
@@ -446,6 +520,7 @@ function _create(parentWebpageInfo) {
         /**
           Object containing various settings of the web page
 
+            - allowMedia: false to not load media (audio / video). Defaults to true. SlimerJS only.
             - javascriptEnabled: false if scripts of the page should not be executed (defaults to true).
             - loadImages: false to not load images (defaults to true).
             - localToRemoteUrlAccessEnabled: defines whether local resource (e.g. from file) can access remote URLs or not (defaults to false).
@@ -455,7 +530,7 @@ function _create(parentWebpageInfo) {
             - XSSAuditingEnabled defines whether load requests should be monitored for cross-site scripting attempts (defaults to false).
             - webSecurityEnabled defines whether web security should be enabled or not (defaults to true).
             - maxAuthAttempts: integer
-            - resourceTimeout: integer
+            - resourceTimeout: integer, in milliseconds. warning, it is converted into seconds
             - javascriptCanOpenWindows
             - javascriptCanCloseWindows
             Note: The settings apply only during the initial call to the WebPage#open function. Subsequent modification of the settings object will not have any impact.
@@ -650,8 +725,9 @@ function _create(parentWebpageInfo) {
          */
         openUrl: function(url, httpConf, settings, callback) {
 
-            if (settings)
+            if (settings) {
                 this.settings = settings;
+            }
 
             if (!httpConf) {
                 httpConf = {
@@ -681,8 +757,55 @@ function _create(parentWebpageInfo) {
                 return result;
             });
 
-            var options = getNetLoggerOptions(this, deferred, this.customHeaders);
+            let options = getNetLoggerOptions(this, deferred, this.customHeaders);
 
+            let loadUri = function() {
+                netLog.registerBrowser(browser, options);
+                try {
+                    webpageUtils.browserLoadURI(browser, url, httpConf);
+                }
+                catch(e) {
+                    // we simulate PhantomJS behavior on url errors
+                    options.onLoadStarted('');
+                    options.onURLChanged('about:blank');
+                    if (e.message == 'NS_ERROR_UNKNOWN_PROTOCOL') {
+                        options.onRequest({
+                            id: 1,
+                            method: httpConf.operation,
+                            url: url,
+                            time: new Date(),
+                            headers: (('headers' in httpConf)?httpConf.headers:[])
+                            }, null
+                        );
+                        options.onError({id: 1,
+                            url: url,
+                            errorCode:301,
+                            errorString:"Protocol is unknown",
+                            status:null,
+                            statusText:null
+                        });
+                        options.onResponse( {
+                            id: 1,
+                            url: url,
+                            time: new Date(),
+                            headers: [],
+                            bodySize: 0,
+                            contentType: null,
+                            contentCharset: null,
+                            redirectURL: null,
+                            stage: "end",
+                            status: null,
+                            statusText: null,
+                            // Extensions
+                            referrer: "",
+                            isFileDownloading : false,
+                            body: ""
+                        });
+                    }
+                    options.onLoadFinished(url, "fail");
+                }
+            }
+            
             if (DEBUG_WEBPAGE)
                 slDebugLog("webpage: openUrl "+url+" conf:"+slDebugGetObject(httpConf));
 
@@ -692,8 +815,7 @@ function _create(parentWebpageInfo) {
                     browserJustCreated = false;
                 }
                 // don't recreate a browser if already opened.
-                netLog.registerBrowser(browser, options);
-                webpageUtils.browserLoadURI(browser, url, httpConf);
+                loadUri();
                 return deferred.promise;
             }
 
@@ -705,13 +827,20 @@ function _create(parentWebpageInfo) {
                 me.initialized();
                 browserJustCreated = false;
                 browser.authAttempts = 0;
-                netLog.registerBrowser(browser, options);
-                webpageUtils.browserLoadURI(browser, url, httpConf);
+                loadUri();
             }, null, privProp.viewportSize);
             // to catch window.open()
             win.QueryInterface(Ci.nsIDOMChromeWindow)
                .browserDOMWindow= slBrowserDOMWindow;
             return deferred.promise;
+        },
+
+        get loading () {
+            return (privProp.loadingProgress > 0 &&   privProp.loadingProgress < 100);
+        },
+
+        get loadingProgress () {
+            return privProp.loadingProgress;
         },
 
         /**
@@ -842,11 +971,20 @@ function _create(parentWebpageInfo) {
             if (typeof val != "object")
                 throw new Error("Bad argument type");
 
+            val = heritage.mix({width:privProp.viewportSize.width,
+                               height:privProp.viewportSize.height}, val);
             let w = val.width || privProp.viewportSize.width;
             let h = val.height || privProp.viewportSize.height;
 
-            if (w < 0 || h < 0)
+            if (typeof w != "number") {
+                w = parseInt(w, 10);
+            }
+            if (typeof h != "number") {
+                h = parseInt(h, 10);
+            }
+            if (w < 0 || h < 0) {
                 return;
+            }
 
             privProp.viewportSize.width = w;
             privProp.viewportSize.height = h;
@@ -858,7 +996,9 @@ function _create(parentWebpageInfo) {
 
             let domWindowUtils = win.QueryInterface(Ci.nsIInterfaceRequestor)
                                     .getInterface(Ci.nsIDOMWindowUtils);
-            domWindowUtils. setCSSViewport(w,h);
+            if ('setCSSViewport' in domWindowUtils) {
+                domWindowUtils. setCSSViewport(w,h);
+            }
             win.resizeTo(w,h);
             domWindowUtils.redraw(1);
         },
@@ -1043,6 +1183,11 @@ function _create(parentWebpageInfo) {
         // -------------------------------- Javascript evaluation
 
         /**
+         * Evaluate the given function into the context of the web page content
+         * 
+         * @param function  func    the function to evaluate
+         * @param ...       args    arguments for the function
+         *
          * FIXME: modifying a variable in a sandbox
          * that inherits of the context of a window,
          * does not propagate the modification into
@@ -1053,33 +1198,14 @@ function _create(parentWebpageInfo) {
          * @see a solution used for the Firefox webconsole
          * https://hg.mozilla.org/mozilla-central/rev/f5d6c95a9de9#l6.374
          */
-        evaluate: function(func) {
+        evaluate: function(func, ...args) {
             if (!browser)
                 throw new Error("WebPage not opened");
 
-            if (!(func instanceof Function
-                  || typeof func === 'function'
-                  || typeof func === 'string'
-                  || func instanceof String)) {
+            let f = prepareJSEval(func, args);
+            if (f === false) {
                 throw new Error("Wrong use of WebPage#evaluate");
             }
-
-            let args = Array.prototype.slice.call(arguments).slice(1).map(
-                          function(arg){
-                                let type = typeof arg;
-                                switch(type) {
-                                    case 'object':
-                                        if (!arg || arg instanceof RegExp) {
-                                            return ""+arg;
-                                        }
-                                    case 'string':
-                                        return JSON.stringify(arg);
-                                    default:
-                                        return ""+arg
-                                }
-                          });
-
-            let f = '('+func.toString()+').apply(this, [' + args.join(",") + ']);';
             return evalInSandbox(f, 'phantomjs://webpage.evaluate()');
         },
 
@@ -1090,13 +1216,27 @@ function _create(parentWebpageInfo) {
             return evalInSandbox(src, 'phantomjs://webpage.evaluateJavaScript()');
         },
 
-        evaluateAsync: function(func) {
-            if (!browser)
+        /**
+         * @param function  func  the function to evaluate
+         * @param integer   timeMs  time to wait before execution
+         * @param ...       args    other args are arguments for the function
+         */
+        evaluateAsync: function(func, timeMs, ...args) {
+            if (!browser) {
                 throw new Error("WebPage not opened");
-            let f = '('+func.toSource()+')();';
+            }
+
+            let f = prepareJSEval(func, args);
+            if (f === false) {
+                throw new Error("Wrong use of WebPage#evaluateAsync");
+            }
+
+            if (timeMs == undefined) {
+                timeMs = 0;
+            }
             browser.contentWindow.setTimeout(function() {
                 evalInSandbox(f, 'phantomjs://webpage.evaluateAsync()');
-            }, 0)
+            }, timeMs)
         },
 
         includeJs: function(url, callback) {
@@ -1132,7 +1272,7 @@ function _create(parentWebpageInfo) {
             if (!browser) {
                 throw new Error("WebPage not opened");
             }
-            let f = slUtils.getAbsMozFile(filename, Services.dirsvc.get("CurWorkD", Ci.nsIFile));
+            let f = slUtils.getAbsMozFile(filename, slUtils.workingDirectory);
             if (!f.exists()) {
                 // filename resolved against the libraryPath property
                 f = slUtils.getAbsMozFile(filename, libPath);
@@ -1193,7 +1333,11 @@ function _create(parentWebpageInfo) {
                 throw new Error("WebPage not opened");
 
             eventType = eventType.toLowerCase();
-            browser.contentWindow.focus();
+
+            if (!browser.contentDocument.hasFocus()) {
+                // only set focus if needed, else it can break focus (Gecko 54+) and some keys don't work in inputs
+                browser.contentWindow.focus();
+            }
             let domWindowUtils = browser.contentWindow
                                         .QueryInterface(Ci.nsIInterfaceRequestor)
                                         .getInterface(Ci.nsIDOMWindowUtils);
@@ -1443,27 +1587,28 @@ function _create(parentWebpageInfo) {
             let requirements = {
                 top: {
                     is: ["undefined", "number"],
-                    ok: function(val)  val === undefined || val >= 0,
+                    ok: (val) => val === undefined || val >= 0,
                     msg: "clipRect.top should be a positive integer"
                 },
                 left: {
                     is: ["undefined", "number"],
-                    ok: function(val)  val === undefined || val >= 0,
+                    ok: (val) => val === undefined || val >= 0,
                     msg: "clipRect.left should be a positive integer"
                 },
                 width: {
                     is: ["undefined", "number"],
-                    ok: function(val) val === undefined || val >= 0,
+                    ok: (val) => val === undefined || val >= 0,
                     msg: "clipRect.width should be a positive integer"
                 },
                 height: {
                     is: ["undefined", "number"],
-                    ok: function(val) val === undefined || val >= 0,
+                    ok: (val) => val === undefined || val >= 0,
                     msg: "clipRect.height should be a positive integer"
                 },
             }
             if (typeof(value) === "object") {
-                privProp.clipRect = validateOptions(value, requirements);
+                privProp.clipRect = heritage.mix({top:0, left:0, width:0, height:0},
+                                                 validateOptions(value, requirements));
             } else {
                 privProp.clipRect = null;
             }
@@ -1509,7 +1654,7 @@ function _create(parentWebpageInfo) {
             let file = fs.absolute(filename);
 
             try {
-                let finalOptions = webpageUtils.getScreenshotOptions(this, options, fs.extension(file));
+                let finalOptions = webpageUtils.getScreenshotOptions(this, options, fs.extension(file, true));
                 if (finalOptions.format == 'pdf') {
                     let printOptions = webpageUtils.getPrintOptions(this, browser.contentWindow, file, finalOptions);
                     if (printOptions === null) {
@@ -1545,6 +1690,9 @@ function _create(parentWebpageInfo) {
                 return true;
             }
             catch(e) {
+                if (DEBUG_WEBPAGE) {
+                    dumpex(e);
+                }
                 return false;
             }
         },
@@ -1574,6 +1722,9 @@ function _create(parentWebpageInfo) {
                 return content;
             }
             catch(e) {
+                if (DEBUG_WEBPAGE) {
+                    dumpex(e);
+                }
                 return null;
             }
         },
@@ -1625,6 +1776,8 @@ function _create(parentWebpageInfo) {
 
         onResourceError : null,
 
+        onResourceTimeout : null,
+
         onResourceRequested : null,
 
         onResourceReceived : null,
@@ -1632,36 +1785,36 @@ function _create(parentWebpageInfo) {
         //This callback is invoked when the URL changes, e.g. as it navigates away from the current URL.
         onUrlChanged : null,
 
+        // Callback invoked when a file is downloaded .
+        onFileDownload : null,
+
+        onFileDownloadError: null,
+
         // -------------------------------- private methods to send some events
         closing:function (page) {
-            if (this.onClosing) {
-                this.onClosing(page);
-            }
+            executePageListener(this, 'onClosing', [page]);
         },
 
         initialized: function() {
             webPageSandbox = null;
             if (browser) {
                 let ds = browser.docShell;
+                ds.allowMedia = privProp.settings.allowMedia;
                 ds.allowImages = privProp.settings.loadImages;
                 ds.allowJavascript = privProp.settings.javascriptEnabled;
             }
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onInitialized");
             }
-
-            if (this.onInitialized)
-                this.onInitialized();
+            executePageListener(this, 'onInitialized');
         },
 
         javaScriptAlertSent: function(message) {
-            if (this.onAlert)
-                this.onAlert(message);
+            executePageListener(this, 'onAlert', [message]);
         },
 
         javaScriptConsoleMessageSent: function(message, lineNumber, fileName) {
-            if (this.onConsoleMessage)
-                onConsoleMessage(message, lineNumber, fileName);
+            executePageListener(this, 'onConsoleMessage', [message, lineNumber, fileName]);
         },
 
         loadFinished: function(status, url, isFrame) {
@@ -1670,8 +1823,7 @@ function _create(parentWebpageInfo) {
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onLoadFinished status:"+status+" url:"+url+" isFrame:"+isFrame);
             }
-            if (this.onLoadFinished)
-                this.onLoadFinished(status, url, isFrame);
+            executePageListener(this, 'onLoadFinished', [status, url, isFrame]);
         },
 
         loadStarted: function(url, isFrame) {
@@ -1679,8 +1831,7 @@ function _create(parentWebpageInfo) {
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onLoadStarted url:"+url+" isFrame:"+isFrame);
             }
-            if (this.onLoadStarted)
-                this.onLoadStarted(url, isFrame);
+            executePageListener(this, 'onLoadStarted', [url, isFrame]);
         },
 
         /**
@@ -1695,37 +1846,40 @@ function _create(parentWebpageInfo) {
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onNavigationRequested url:"+url+" navigationType:"+navigationType+" willNavigate:"+willNavigate+" isMainFrame:"+isMainFrame);
             }
-            if (this.onNavigationRequested)
-                this.onNavigationRequested(url, navigationType, willNavigate, isMainFrame)
+            executePageListener(this, 'onNavigationRequested', [url, navigationType, willNavigate, isMainFrame]);
         },
 
         rawPageCreated: function(page) {
-            if (this.onPageCreated)
-                this.onPageCreated(page);
+            executePageListener(this, 'onPageCreated', [page]);
         },
 
         resourceError: function(error) {
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onResourceError error:"+slDebugGetObject(error));
             }
-            if (this.onResourceError)
-                this.onResourceError(error);
+            executePageListener(this, 'onResourceError', [error]);
         },
 
-        resourceReceived: function(request) {
+        resourceTimeout: function(error) {
             if (DEBUG_WEBPAGE_LOADING) {
-                slDebugLog("webpage: onResourceReceived request:"+slDebugGetObject(request, ['body']));
+                slDebugLog("webpage: onResourceTimeout error:"+slDebugGetObject(error));
             }
-            if (this.onResourceReceived)
-                this.onResourceReceived(request);
+            executePageListener(this, 'onResourceTimeout', [error]);
+        },
+
+        resourceReceived: function(resource) {
+            if (DEBUG_WEBPAGE_LOADING) {
+                slDebugLog("webpage: onResourceReceived resource:"+slDebugGetObject(resource, ['body']));
+            }
+
+            executePageListener(this, 'onResourceReceived', [resource]);
         },
 
         resourceRequested: function(resource, request) {
             if (DEBUG_WEBPAGE_LOADING) {
                 slDebugLog("webpage: onResourceRequested resource:"+slDebugGetObject(resource));
             }
-            if (this.onResourceRequested)
-                this.onResourceRequested(resource, request);
+            executePageListener(this, 'onResourceRequested', [resource, request]);
         },
 
         urlChanged: function(url) {
@@ -1733,10 +1887,37 @@ function _create(parentWebpageInfo) {
                 slDebugLog("webpage: onUrlChanged url:"+url);
             }
             webPageSandbox = null;
-            if (this.onUrlChanged)
-                this.onUrlChanged(url);
+            executePageListener(this, 'onUrlChanged', [url]);
+        },
+
+        fileDownload : function(url, responseData) {
+            if (DEBUG_WEBPAGE_LOADING) {
+                slDebugLog("webpage: onFileDownload "+url);
+            }
+            return executePageListener(this, 'onFileDownload', [url, responseData]);
+        },
+
+        fileDownloadError : function(message) {
+            if (DEBUG_WEBPAGE_LOADING) {
+                slDebugLog("webpage: onFileDownloadError: "+message);
+            }
+            executePageListener(this, 'onFileDownloadError', [message]);
         }
     };
+
+    function executePageListener(page, listener, args) {
+        if (page[listener]) {
+            try {
+                return page[listener].apply(page, args);
+            } catch(e) {
+                if (listener !== "onError" && page["onError"]) {
+                    executePageListener(page, "onError", getTraceException(e, ''));
+                } else {
+                    console.log("Error "+listener+": ["+e.name+"] "+e.message+" ("+e.fileName+" ; line:"+e.lineNumber+" col:"+e.columnNumber+")");
+                }
+            }
+        }
+    }
 
     // initialization
     return openBlankBrowser(false);

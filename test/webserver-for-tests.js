@@ -116,6 +116,14 @@ webserverTest.listen(8083, function(request, response) {
         return;
     }
 
+    if (request.url == '/timeouttest') {
+        window.setTimeout(function () {
+            response.write('done');
+            response.close();
+        }, 10000);
+        return;
+    }
+
     if (request.url == '/posturlencodeddata') {
         response.statusCode = 200;
         response.headers = { "Content-Type": "text/plain;charset=UTF-8"}
@@ -166,6 +174,22 @@ webserverTest.listen(8083, function(request, response) {
         return;
     }
 
+    if (/^\/downloadzipfile/.test(request.url)) {
+        let content = fs.read(phantom.libraryPath+'/www/example.zip', "b");
+        response.statusCode = 200;
+        let headers = { "Content-Type": "application/zip"}
+        headers['Content-Length'] = content.length;
+        if (request.url == '/downloadzipfile?dispo') {
+            headers['Content-Disposition'] = 'attachment; filename="super.zip"';
+            headers['Content-Description'] = 'File download';
+            headers['Content-Transfer-Encoding'] = 'binary';
+        }
+        response.headers = headers;
+        response.write(content);
+        response.close();
+        return;
+    }
+
     var filepath = phantom.libraryPath+'/www'+request.url;
     if (fs.exists(filepath)){
         if (fs.isFile(filepath)) {
@@ -174,7 +198,7 @@ webserverTest.listen(8083, function(request, response) {
             var h = {};
             var enc = '';
             var binfile = false;
-            if (filepath.match(/\.png$/)) {
+            if (filepath.match(/\.(png)$/)) {
                 //response.setEncoding("binary");
                 //h['Content-Type'] = 'image/png';
                 binfile = true;
@@ -191,14 +215,24 @@ webserverTest.listen(8083, function(request, response) {
             else if (filepath.match(/\.json$/)) {
                h['Content-Type'] = 'application/json';
             }
+            else if (filepath.match(/\.zip$/)) {
+               h['Content-Type'] = 'application/zip';
+               binfile = true;
+            }
+            else if (filepath.match(/\.pdf$/)) {
+               h['Content-Type'] = 'application/pdf';
+               binfile = true;
+            }
             else {
                 h['Content-Type'] = 'text/html;charset=UTF-8';
             }
 
-            if (binfile)
+            if (binfile) {
                 str = fs.read(filepath, "b")
-            else
+            }
+            else {
                 str = fs.read(filepath)
+            }
 
             h['Content-Length'] = str.length;
             response.headers = h;

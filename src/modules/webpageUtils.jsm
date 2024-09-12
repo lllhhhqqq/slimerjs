@@ -14,6 +14,7 @@ const de = Ci.nsIDocumentEncoder;
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import('resource://slimerjs/httpUtils.jsm');
 Cu.import('resource://slimerjs/slUtils.jsm');
+Cu.import("resource://gre/modules/NetUtil.jsm");
 
 var webpageUtils = {
 
@@ -59,17 +60,19 @@ var webpageUtils = {
         }
         // probably the window is an iframe of the webpage. check if this is
         // the case
-        // FIXME use windowMediator.getOuterWindowWithId https://bugzilla.mozilla.org/show_bug.cgi?id=861495
-        let iframe = domWindowUtils.getOuterWindowWithId(outerWindowId);
+        let iframe = Services.wm.getOuterWindowWithId(outerWindowId);
         if (iframe) {
             let dwu = iframe.top.QueryInterface(Ci.nsIInterfaceRequestor)
                             .getInterface(Ci.nsIDOMWindowUtils);
             if (dwu.outerWindowID == domWindowUtils.outerWindowID) {
-                let frameLoader = iframe.QueryInterface(Components.interfaces.nsIFrameLoaderOwner).frameLoader;
-                if (!frameLoader) {
+                let frameLoaderOwner = null;
+                try {
+                    frameLoaderOwner = iframe.QueryInterface(Components.interfaces.nsIFrameLoaderOwner);
+                } catch(e) {}
+                if (!frameLoaderOwner || !frameLoaderOwner.frameLoader) {
                     return browser.currentURI.spec+"#from-an-unknown-iframe";
                 }
-                return frameLoader.docShell.QueryInterface(Components.interfaces.nsIWebNavigation).currentURI.spec;
+                return frameLoaderOwner.frameLoader.docShell.QueryInterface(Components.interfaces.nsIWebNavigation).currentURI.spec;
             }
         }
         return false;
@@ -146,7 +149,6 @@ var webpageUtils = {
      * @see webpage.open
      */
     browserLoadURI: function (browser, uri, httpConf) {
-
         let hasDataToPost = ('data' in httpConf && httpConf.data)
 
         // prepare headers
@@ -190,12 +192,15 @@ var webpageUtils = {
 
             postStream = Cc["@mozilla.org/network/mime-input-stream;1"].
                             createInstance(Ci.nsIMIMEInputStream);
-            if (contentType)
+            if (contentType) {
                 postStream.addHeader("Content-Type", contentType);
-            else
+            }
+            else {
                 postStream.addHeader("Content-Type", "application/x-www-form-urlencoded");
-            if (!hasContentLength)
+            }
+            if (!hasContentLength && geckoMajorVersion < 57) {
                 postStream.addContentLength = true;
+            }
             postStream.setData(dataStream);
         }
 
@@ -203,7 +208,7 @@ var webpageUtils = {
         browser.userTypedClear++;
 
         if (!/^[a-z]+\:/i.test(uri) ) {
-            let f = slUtils.getAbsMozFile(uri, Services.dirsvc.get("CurWorkD", Ci.nsIFile));
+            let f = slUtils.getAbsMozFile(uri, slUtils.workingDirectory);
             uri = Services.io.newFileURI(f).spec;
         }
         try {
@@ -211,10 +216,25 @@ var webpageUtils = {
                                      0,
                                      null,
                                      postStream,
-                                     headersStream);
+                                     headersStream,
+              null);
         }catch(e) {
-            // if content is not loaded because of navigation locked,
-            // we have an exception;
+            // we have an exception when:
+            // - the navigation locked, 0x805e0006 (<unknown>)
+            // - the uri is malformed 0x80004005 (NS_ERROR_FAILURE)
+            // - the protocol is unknown 0x804b0012 (NS_ERROR_UNKNOWN_PROTOCOL)
+            
+            let match = /nsresult: "0x([a-f0-9]+) \(([^\)]+)\)/.exec(e.toString());
+            if (match) {
+                if (match[1] != "805e0006") {
+                    let err = new Error(match[2])
+                    throw err;
+                }
+            }
+            else {
+                let err = new Error("UNKNOWN");
+                throw err;
+            }
         } finally {
             if (browser.userTypedClear)
                 browser.userTypedClear--;
@@ -285,7 +305,13 @@ var webpageUtils = {
         streamChannel.setURI(uri);
         streamChannel.contentStream = stringStream;
 
+        var netChannel = NetUtil.newChannel({
+          uri: uri,
+          loadUsingSystemPrincipal: true,
+        });
+
         var channel = streamChannel.QueryInterface(Ci.nsIChannel);
+        channel.loadInfo = netChannel.loadInfo;
         channel.contentCharset = "UTF-8"
 
         var loadFlags = channel.LOAD_DOCUMENT_URI |
@@ -389,17 +415,27 @@ var webpageUtils = {
                         height:currentViewport.height
                         }
         }
-        else
+        else {
             givenClip = webpage.clipRect;
+        }
 
         // this clip size is at zoom = 1
         let clip = {top: 0, left: 0, width: 0, height: 0};
 
         // content size is the size at ratio=1
-        let contentWidth = Math.max(b.clientWidth, b.scrollWidth, b.offsetWidth,
-                                de.clientWidth, de.scrollWidth, de.offsetWidth);
-        let contentHeight = Math.max(b.clientHeight, b.scrollHeight, b.offsetHeight,
-                                de.clientHeight, de.scrollHeight, de.offsetHeight);
+        let contentWidth = 0;
+        let contentHeight = 0;
+
+        if (b) {
+            contentWidth = Math.max(b.clientWidth, b.scrollWidth, b.offsetWidth,
+                                    de.clientWidth, de.scrollWidth, de.offsetWidth);
+            contentHeight =Math.max(b.clientHeight, b.scrollHeight, b.offsetHeight,
+                                    de.clientHeight, de.scrollHeight, de.offsetHeight);
+        }
+        else { // b is undefined for non html document like svg
+            contentWidth = Math.max(de.clientWidth, de.scrollWidth, de.offsetWidth);
+            contentHeight = Math.max(de.clientHeight, de.scrollHeight, de.offsetHeight);
+        }
 
         if ((givenClip.top == 0 && givenClip.left == 0 && givenClip.width == 0 && givenClip.height == 0)) {
             clip.top = scrollY / ratio;
@@ -536,17 +572,20 @@ var webpageUtils = {
         printSettings.resolution              = 300;
         printSettings.paperSizeUnit           = Ci.nsIPrintSettings.kPaperSizeInches;
         printSettings.scaling                 = options.ratio;
-//        printSettings.shrinkToFit             = false;
 
         if ('width' in paperSize && 'height' in paperSize) {
-            printSettings.paperSizeType =  printSettings.kPaperSizeDefined;
+            if ('paperSizeType' in printSettings) { // FX<=45
+                printSettings.paperSizeType =  Ci.nsIPrintSettings.kPaperSizeDefined;
+            }
             printSettings.paperName = 'Custom';
             printSettings.paperWidth = stringToInches(paperSize.width);
             printSettings.paperHeight = stringToInches(paperSize.height);
             printSettings.shrinkToFit = false;
         } else {
             // for now, we trust the printer config to have the format we want
-            printSettings.paperSizeType  = printSettings.kPaperSizeNativeData;
+            if ('paperSizeType' in printSettings) { // FX<=45
+                printSettings.paperSizeType  = Ci.nsIPrintSettings.kPaperSizeNativeData;
+            }
             printSettings.paperName = paperSize.format;
             if (paperSize.format in this.paperFormat) {
                 // it seems that paper width and height are not set automatically...
@@ -555,9 +594,9 @@ var webpageUtils = {
             }
             if ("orientation" in paperSize) {
                 if (paperSize.orientation == "landscape") {
-                    printSettings.orientation = printSettings.kLandscapeOrientation;
+                    printSettings.orientation = Ci.nsIPrintSettings.kLandscapeOrientation;
                 } else {
-                    printSettings.orientation = printSettings.kPortraitOrientation;
+                    printSettings.orientation = Ci.nsIPrintSettings.kPortraitOrientation;
                 }
             }
         }

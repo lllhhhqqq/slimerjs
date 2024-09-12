@@ -8,6 +8,7 @@ Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
 Components.utils.import("resource://gre/modules/Services.jsm");
 Components.utils.import("resource://slimerjs/slConfiguration.jsm");
 Components.utils.import("resource://slimerjs/slUtils.jsm");
+Components.utils.import('resource://slimerjs/slExit.jsm');
 
 var envService = Components.classes["@mozilla.org/process/environment;1"].
           getService(Components.interfaces.nsIEnvironment);
@@ -49,17 +50,22 @@ var externalScriptHandler = {
     },
     declareScript : function(cmdLine) {
         let file = null;
-        if (/Mac/i.test(httphandler.oscpu)) {
-            // under MacOS, resolveFile fails with a relative path
-            try {
+        try {
+            if (/Mac/i.test(httphandler.oscpu)) {
+                // under MacOS, resolveFile fails with a relative path
+                try {
+                    file = cmdLine.resolveFile(slConfiguration.args[0]);
+                }
+                catch(e) {
+                    file = slUtils.getAbsMozFile(slConfiguration.args[0], cmdLine.workingDirectory)
+                }
+            }
+            else {
                 file = cmdLine.resolveFile(slConfiguration.args[0]);
             }
-            catch(e) {
-                file = slUtils.getAbsMozFile(slConfiguration.args[0], cmdLine.workingDirectory)
-            }
         }
-        else {
-            file = cmdLine.resolveFile(slConfiguration.args[0]);
+        catch(e) {
+            throw new Error("script not found");
         }
         if (!file.exists())
             throw new Error("script not found");
@@ -101,9 +107,10 @@ var webDriverScriptHandler = {
         slConfiguration.baseURIStrictCommonJS.push(this._getDir().path);
 
         function parse_webdriver(val, cmdlineOpt) {
-            let pos = val.lastIndexOf(':')
+            let pos = val.lastIndexOf(':');
             if ( pos > 0) {
-                [slConfiguration.webdriverIp, slConfiguration.webdriverPort] = val.split(":");
+                slConfiguration.webdriverIp = val.substring(0, pos);
+                slConfiguration.webdriverPort = val.substring(pos+1);
             }
             else {
                 slConfiguration.webdriverPort = val;
@@ -231,7 +238,8 @@ slCommandLine.prototype = {
             }
             Components.utils.reportError(msg);
             dump(msg+"\n");
-            cmdLine.preventDefault = true
+            cmdLine.preventDefault = true;
+            slExit.exit(1);
         }
         else {
             // yes, we found a script handler!
@@ -245,7 +253,8 @@ slCommandLine.prototype = {
                 let msg = ("getMessage" in e?e.getMessage() : "" +e);
                 Components.utils.reportError(msg);
                 dump(msg + "\n");
-                cmdLine.preventDefault = true
+                cmdLine.preventDefault = true;
+                slExit.exit(1);
                 return;
             }
         }

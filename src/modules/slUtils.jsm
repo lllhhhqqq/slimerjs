@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/.
  */
 "use strict";
-var EXPORTED_SYMBOLS = ["dumpex", "dumpStack", "dumpo", "slUtils"];
+var EXPORTED_SYMBOLS = ["dumpex", "dumpStack", "dumpo", "slUtils", "geckoMajorVersion"];
 
 const Cc = Components.classes;
 const Ci = Components.interfaces;
@@ -14,9 +14,23 @@ const scriptableStream = Cc["@mozilla.org/scriptableinputstream;1"].getService(C
 
 Cu.import("resource://gre/modules/Services.jsm");
 
-var slUtils = {};
+var dirsvc = Cc["@mozilla.org/file/directory_service;1"]
+             .getService(Ci.nsIProperties);
 
-const isWin = (Services.dirsvc.get("CurWorkD", Ci.nsIFile) instanceof Ci.nsILocalFileWin);
+var currentWorkingDirectory = dirsvc.get("CurWorkD", Ci.nsIFile);
+
+const geckoMajorVersion = parseInt(Services.appinfo.platformVersion.split('.')[0],10);
+
+var slUtils = {
+    get workingDirectory() {
+        return currentWorkingDirectory;
+    },
+    set workingDirectory(dir) {
+        currentWorkingDirectory = dir;
+    }
+};
+
+const isWin = (currentWorkingDirectory instanceof Ci.nsILocalFileWin);
 
 function dumpo(obj, indent) {
     if (typeof obj != 'object') {
@@ -84,16 +98,17 @@ slUtils.getAbsMozFile = function getAbsMozFile(path, basepath) {
     var file = basepath.clone();
     var pathElements = path.split(/[\\\/]/);
     var first = pathElements[0];
-    if (pathElements.length == 1) {
-        if (first)
+    if (pathElements.length == 1 && !(isWin && first.match(/\:$/))) {
+        if (first) {
             file.append(first);
+        }
         return file;
     }
 
     if ( (isWin && first.match(/\:$/)) || (!isWin && first == '')) {
         // this is an absolute path
         file = Cc['@mozilla.org/file/local;1']
-                  .createInstance(Ci.nsILocalFile);
+                  .createInstance(Ci.nsIFile);
         if (isWin) {
             file.initWithPath(path.replace(/\//g, "\\"));
         }
@@ -136,7 +151,7 @@ slUtils.getMozFile = function getMozFile(path) {
     }
 
     let file = Cc['@mozilla.org/file/local;1']
-              .createInstance(Ci.nsILocalFile);
+              .createInstance(Ci.nsIFile);
     file.initWithPath(path);
     return file;
 }
@@ -172,34 +187,6 @@ slUtils.readChromeFile = function readChromeFile(url) {
     return str;
 }
 
-/**
- *  Writes exit status code in `ProfileDir/exitstatus` file.
- *  Note:
- *  We must follow the evolution of xulrunner in order to remove this patch.
- *  If they add API for user defined exit status of xulrunner, we must use it instead of this patch. 
- */
-slUtils.writeExitStatus = function (status) {
-    var envService = Cc["@mozilla.org/process/environment;1"]
-                      .getService(Ci.nsIEnvironment);
-    if (!envService.exists('__SLIMER_EXITCODEFILE')) {
-        return;
-    }
-    let filePath = envService.get('__SLIMER_EXITCODEFILE');
-    let file = Cc['@mozilla.org/file/local;1']
-                .createInstance(Ci.nsILocalFile);
-    file.initWithPath(filePath);
-
-    let str = String(status);
-    let foStream = Cc["@mozilla.org/network/file-output-stream;1"].createInstance(Ci.nsIFileOutputStream);
-    foStream.init(file, (0x02 | 0x08 | 0x20), parseInt("0444", 8), 0);
-    try {
-        foStream.write(str, str.length);
-    }
-    finally {
-        foStream.close();
-    }
-} 
-
 slUtils.getWebpageFromContentWindow = function getWebpageFromContentWindow(contentWin) {
     let browser = slUtils.getBrowserFromContentWindow(contentWin);
     if (browser) {
@@ -219,9 +206,11 @@ slUtils.getBrowserFromContentWindow = function getBrowserFromContentWindow(conte
                         .getInterface(Components.interfaces.nsIDOMWindow);
 
         */
-        var docShell = contentWin.top.QueryInterface(Ci.nsIInterfaceRequestor)
+        let win = ('top' in contentWin?contentWin.top:contentWin);
+        let docShell = win.QueryInterface(Ci.nsIInterfaceRequestor)
                          .getInterface(Ci.nsIWebNavigation)
                          .QueryInterface(Ci.nsIDocShell);
+
         return slUtils.getBrowserFromDocShell(docShell);
     }
     catch(e) {
@@ -230,7 +219,7 @@ slUtils.getBrowserFromContentWindow = function getBrowserFromContentWindow(conte
 }
 
 slUtils.getWebpageFromDocShell = function getWebpageFromDocShell(docShell) {
-    let browser = slUtils.getBrowserFromDocShell(docShell)
+    let browser = slUtils.getBrowserFromDocShell(docShell);
     if (browser)
         return browser.webpage;
     return null;
@@ -238,15 +227,20 @@ slUtils.getWebpageFromDocShell = function getWebpageFromDocShell(docShell) {
 
 slUtils.getBrowserFromDocShell = function getBrowserFromDocShell(docShell) {
     try {
-        var browser= docShell.chromeEventHandler;
+        // given docShell may be the xul window's one
+        if (docShell.currentURI.spec === "chrome://slimerjs/content/webpage.xul") {
+            return docShell.contentViewer.DOMDocument.getElementById('webpage');
+        }
+
+        let browser= docShell.chromeEventHandler;
         if (!browser) {
             return null;
         }
-        if (browser.getAttribute('id') != 'webpage') {
+        if (browser.getAttribute('id') !== 'webpage') {
             return null;
         }
 
-        if (browser.ownerDocument.documentElement.getAttribute("windowtype") != 'slimerpage') {
+        if (browser.ownerDocument.documentElement.getAttribute("windowtype") !== 'slimerpage') {
             return null;
         }
         return browser;

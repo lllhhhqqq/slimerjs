@@ -8,7 +8,7 @@ module.metadata = {
   "stability": "experimental"
 };
 
-const {Cc,Ci,Cr} = require("chrome");
+const {Cc,Ci,Cr,Cu} = require("chrome");
 const byteStreams = require("./byte-streams");
 const textStreams = require("./text-streams");
 
@@ -22,54 +22,30 @@ const OPEN_FLAGS = {
   EXCL: parseInt("0x80")
 };
 
-var dirsvc = Cc["@mozilla.org/file/directory_service;1"]
-             .getService(Ci.nsIProperties);
-
-var currentWorkingDirectory = dirsvc.get("CurWorkD", Ci.nsIFile);
+Cu.import('resource://slimerjs/slUtils.jsm');
 
 var _separator = '/';
 var isWin = false;
 
-if (currentWorkingDirectory instanceof Ci.nsILocalFileWin) {
+if (slUtils.workingDirectory instanceof Ci.nsILocalFileWin) {
   _separator = '\\';
   isWin = true;
 }
 
 
 function MozFile(path) {
-  let isAbs = false;
-  if (isWin) {
-    path = path.replace(/\//g, "\\");
-    isAbs = (/^([a-z]:)/i.test(path));
-  }
-  else {
-    isAbs = (/^\//i.test(path));
-  }
-
-  let file;
-  if (isAbs) {
-    file = Cc['@mozilla.org/file/local;1']
-                .createInstance(Ci.nsILocalFile);
-    file.initWithPath(path);
-  }
-  else {
-    file = currentWorkingDirectory.clone();
-    file.appendRelativePath(path);
-  }
-
-  return file;
+  return slUtils.getAbsMozFile(path, slUtils.workingDirectory);
 }
 
 // in the file system specification, it is a method
 // but in phantomjs, it is a property. And we want to be compatible with
 // phantomjs
 Object.defineProperty(exports, "workingDirectory", {
-    get: function() { return currentWorkingDirectory.path; }
+    get: function() { return slUtils.workingDirectory.path; }
 });
 
 exports.changeWorkingDirectory = function changeWorkingDirectory(path) {
-    currentWorkingDirectory = MozFile(path);
-    dirsvc.set("CurWorkD", currentWorkingDirectory);
+    slUtils.workingDirectory = MozFile(path);
 }
 
 function ensureReadable(file) {
@@ -85,6 +61,8 @@ function ensureDir(file) {
 
 function ensureFile(file) {
   ensureExists(file);
+  if (file.isSpecial())
+    return;
   if (!file.isFile())
     throw new Error("path is not a file: " + file.path);
 }
@@ -104,6 +82,31 @@ function friendlyError(errOrResult, filename) {
   return isResult ? new Error("XPCOM error code: " + errOrResult) : errOrResult;
 }
 
+function readOpts(modeOrOpts) {
+  if (typeof(modeOrOpts) == 'string') {
+    return { mode : modeOrOpts, charset:null, nobuffer:false}
+  }
+  else if (typeof(modeOrOpts) == 'object') {
+    if (!('mode' in modeOrOpts)) {
+      modeOrOpts.mode = '';
+    }
+    else if (typeof(modeOrOpts.mode) != 'string') {
+      modeOrOpts.mode = '';
+    }
+    if (!('charset' in modeOrOpts)) {
+      modeOrOpts.charset = null;
+    }
+    else if (typeof(modeOrOpts.charset) != 'string' || modeOrOpts.charset == '') {
+      modeOrOpts.charset = null;
+    }
+    if (!('nobuffer' in modeOrOpts)) {
+      modeOrOpts.nobuffer = false;
+    }
+    return modeOrOpts;
+  }
+  return { mode : '', charset:null, nobuffer:false}
+}
+
 exports.exists = function exists(filename) {
   if (!filename)
     return false;
@@ -113,37 +116,67 @@ exports.exists = function exists(filename) {
 exports.isFile = function isFile(filename) {
   if (!filename)
     return false;
-  return MozFile(filename).isFile();
+  let file = MozFile(filename);
+  if (!file.exists()) {
+    return false;
+  }
+  return file.isFile();
+};
+
+exports.isSpecial = function isSpecial(filename) {
+    if (!filename)
+        return false;
+    let file = MozFile(filename);
+    if (!file.exists()) {
+        return false;
+    }
+    return file.isSpecial();
 };
 
 exports.isDirectory = function isDirectory(filename) {
   if (!filename)
     return false;
-  return MozFile(filename).isDirectory();
+  let file = MozFile(filename);
+  if (!file.exists()) {
+    return false;
+  }
+  return file.isDirectory();
 };
 
 exports.isReadable = function isReadable(filename) {
   if (!filename)
     return false;
-  return MozFile(filename).isReadable();
+  let file = MozFile(filename);
+  if (!file.exists()) {
+    return false;
+  }
+  return file.isReadable();
 }
 
 exports.isWritable = function isWritable(filename) {
   if (!filename)
     return false;
-  return MozFile(filename).isWritable();
+  let file = MozFile(filename);
+  if (!file.exists()) {
+    return false;
+  }
+  return file.isWritable();
 }
 
 exports.isLink = function isLink(filename) {
   if (!filename)
     return false;
-  return MozFile(filename).isSymLink();
+  let file = MozFile(filename);
+  if (!file.exists()) {
+    return false;
+  }
+  return file.isSymlink();
 }
 
 exports.size = function size(filename) {
   if (!filename)
     return 0;
-  return MozFile(filename).fileSize();
+  return MozFile(filename).fileSize;
 }
 
 exports.lastModified = function lastModified(filename) {
@@ -153,13 +186,12 @@ exports.lastModified = function lastModified(filename) {
 }
 
 exports.read = function read(filename, mode) {
-  if (typeof(mode) !== "string")
-    mode = "";
+  let opts = readOpts(mode);
 
   // Ensure mode is read-only.
-  mode = /b/.test(mode) ? "b" : "";
+  opts.mode = /b/.test(opts.mode) ? "b" : "";
 
-  var stream = exports.open(filename, mode);
+  var stream = exports.open(filename, opts);
   try {
     var str = stream.read();
   }
@@ -171,8 +203,8 @@ exports.read = function read(filename, mode) {
 };
 
 exports.write = function write(filename, content, mode) {
-  if (typeof(mode) !== "string")
-    mode = "w";
+  let opts = readOpts(mode);
+  mode = opts.mode;
 
   var hasA = /a/.test(mode)
   var hasX = /x/.test(mode)
@@ -183,7 +215,8 @@ exports.write = function write(filename, content, mode) {
   if (hasX)
     mode += "x";
 
-  var stream = exports.open(filename, mode);
+  opts.mode = mode;
+  var stream = exports.open(filename, opts);
   try {
     stream.write(content);
     stream.flush();
@@ -281,11 +314,11 @@ exports.absolute = function base(path) {
     return p[0];
 }
 
-exports.extension = function extension(path) {
-  var leafName = exports.base(path);
-  var m = leafName.match(/\.([^\.]+)$/);
-  if (m)
-    return m[1];
+exports.extension = function extension(path, withoutdot) {
+  var m = path.match(/\.([^\.]+)$/);
+  if (m) {
+    return (withoutdot?m[1]:'.'+m[1]);
+  }
   return '';
 };
 
@@ -306,16 +339,17 @@ exports.list = function list(path) {
 
 exports.open = function open(filename, mode) {
   var file = MozFile(filename);
-  if (typeof(mode) !== "string")
-    mode = "";
+  let opts = readOpts(mode);
+  mode = opts.mode;
 
   // File opened for write only.
   if (/(w|a)/.test(mode)) {
     if (/x/.test(mode) && !file.exists()) {
         throw new friendlyError(Cr.NS_ERROR_FILE_NOT_FOUND, filename);
     }
-    if (file.exists())
+    if (file.exists()) {
       ensureFile(file);
+    }
     var stream = Cc['@mozilla.org/network/file-output-stream;1'].
                  createInstance(Ci.nsIFileOutputStream);
     var openFlags = OPEN_FLAGS.WRONLY |
@@ -333,8 +367,8 @@ exports.open = function open(filename, mode) {
       throw friendlyError(err, filename);
     }
     return /b/.test(mode) ?
-           new byteStreams.ByteWriter(stream) :
-           new textStreams.TextWriter(stream);
+           new byteStreams.ByteWriter(stream, opts.nobuffer) :
+           new textStreams.TextWriter(stream, opts.charset, opts.nobuffer);
   }
 
   // File opened for read only, the default.
@@ -349,7 +383,7 @@ exports.open = function open(filename, mode) {
   }
   return /b/.test(mode) ?
          new byteStreams.ByteReader(stream) :
-         new textStreams.TextReader(stream);
+         new textStreams.TextReader(stream, opts.charset);
 };
 
 exports.remove = function remove(path) {
@@ -424,6 +458,9 @@ exports.copy = function copy(sourceFileName, targetFileName) {
 
 
 function copyDir(sourceDir, targetDir) {
+    if (!targetDir.exists()) {
+        targetDir.create(Ci.nsIFile.DIRECTORY_TYPE, parseInt("0755", 8));
+    }
     let enumDir = sourceDir.directoryEntries;
     while(enumDir.hasMoreElements()) {
         let file = enumDir.getNext().QueryInterface(Ci.nsIFile);
@@ -433,7 +470,6 @@ function copyDir(sourceDir, targetDir) {
         else if (file.isDirectory()) {
             let newDir = targetDir.clone();
             newDir.append(file.leafName);
-            newDir.create(Ci.nsIFile.DIRECTORY_TYPE, parseInt("0755", 8));
             copyDir(file, newDir);
         }
     }
@@ -463,7 +499,7 @@ exports.move = function move(sourceFileName, targetFileName) {
   sourceFile.moveTo(targetFile.parent, targetFile.leafName);
 }
 
-exports.touch = function move(path, date) {
+exports.touch = function touch(path, date) {
   var file = MozFile(path);
   var d;
   if (date)
@@ -486,7 +522,7 @@ exports.readLink = function readLink(path) {
     if (!file.exists()) {
         throw new Error("File does not exists");
     }
-    if (!file.isSymLink()) {
+    if (!file.isSymlink()) {
         throw new Error("The given path is not a symbolic link");
     }
     return file.target;

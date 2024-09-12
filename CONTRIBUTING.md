@@ -1,4 +1,26 @@
 
+
+Note: the development of SlimerJS has been suspended, due to technical issues difficult to resolve with Firefox 60 
+and higher.
+
+
+
+
+How to fill an issue
+====================
+
+When you find a bug in SlimerJS, or you have a problem with Slimerjs, first search in the 
+[issues tracker](https://github.com/laurentj/slimerjs/issues) if a ticket was not already filled about your problem. Please do not add a comment on a closed issue, open a new one.
+
+- Indicate which version of SlimerJS you are using, on which operating system
+  you execute it, and if you are using Firefox with SlimerJS, which version of Firefox.
+- Saying only something like "it doesn't work", is not a valid report. Please describe how the issue
+  has appeared, what are the error messages, what it is displayed. etc. Execute
+  SlimerJS with `--debug=true` to see more messages.
+- Explain how to reproduce it, with the most minimal code. More your example
+  will be tiny, more there is a chance that the bug will be fixed quickly.
+
+
 How to contribute to SlimerJS
 =============================
 
@@ -42,8 +64,8 @@ Run unit tests!
 ---------------
 
 You don't need to create package of SlimerJS to use it and to test it.
-Just call the script *src/slimerjs*. If it does not find Firefox or XulRunner, indicate
-the path of Firefox or XulRunner into a SLIMERJSLAUNCHER environment variable
+Just call the script *src/slimerjs*. If it does not find Firefox, indicate
+the path of Firefox into a SLIMERJSLAUNCHER environment variable
 (see the installation chapter in the documentation).
 
 Unit tests are scripts that tests almost all features of SlimerJS. If you make
@@ -56,3 +78,5 @@ To run tests, just launch
     src/slimerjs  test/launch-rendering-tests.js
 
 We use the test framework [Jasmine](http://pivotal.github.io/jasmine/).
+
+

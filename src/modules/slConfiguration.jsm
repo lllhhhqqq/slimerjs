@@ -14,6 +14,21 @@ Cu.import('resource://slimerjs/slUtils.jsm');
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import('resource://slimerjs/slDebug.jsm');
 
+try {
+    // to avoid issue on navigator object, see https://github.com/laurentj/slimerjs/issues/373
+    // until Gecko 52
+
+    Cu.import('resource://gre/modules/Webapps.jsm');
+} catch (e) {
+    // Webapps.jsm does not exists since Gecko 52
+
+    // At this moment the "--debug" option has not been parsed yet so the error will be silently suppressed to allow
+    // running SlimerJS under control of Light: https://sourceforge.net/projects/lightfirefox/
+}
+
+var httphandler =  Cc["@mozilla.org/network/protocol;1?name=http"]
+                    .getService(Ci.nsIHttpProtocolHandler);
+
 var defaultUA =  Cc["@mozilla.org/network/protocol;1?name=http"]
                       .getService(Ci.nsIHttpProtocolHandler)
                       .userAgent;
@@ -23,6 +38,7 @@ var availableProxyType = { 'auto':true, 'system':true, 'http':true, 'socks5':tru
 
 var optionsSpec = {
     // name: [ 'cmdline option name', 'parser function name', 'default value',  supported],
+    allowMedia: ['allow-media', 'bool', true, true],
     errorLogFile: ['error-log-file', 'file', '', true],
     cookiesFile : ['cookies-file', 'file', '', false],
     diskCacheEnabled : ['disk-cache', 'bool', true, true],
@@ -30,7 +46,7 @@ var optionsSpec = {
     ignoreSslErrors : ['ignore-ssl-errors', 'bool', false, false],
     loadImages: ['load-images', 'bool', true, true],
     localToRemoteUrlAccessEnabled : ['local-to-remote-url-access', 'bool', false, false],
-    outputEncoding : ['output-encoding', 'encoding', 'UTF-8', false],
+    outputEncoding : ['output-encoding', 'encoding', 'UTF-8', true],
     proxyType : ['proxy-type', 'proxytype', 'http', true],
     proxy : ['proxy', 'proxy', null, true],
     proxyHost : ['', '', null, false],
@@ -38,7 +54,6 @@ var optionsSpec = {
     proxyAuth : ['proxy-auth', 'proxyauth', null, true],
     proxyAuthUser : ['', '', '', false],
     proxyAuthPassword : ['', '', '', false],
-    scriptEncoding : ['script-encoding', 'encoding', 'UTF-8', false],
     webSecurityEnabled : ['web-security', 'bool', true, false],
     offlineStoragePath : ['local-storage-path', 'file', '', false],
     offlineStorageDefaultQuota : ['local-storage-quota', 'int', -1, true],
@@ -48,7 +63,10 @@ var optionsSpec = {
     remoteDebuggerPort : ['remote-debugger-port', 'int', -1, false],
     remoteDebuggerAutorun : ['remote-debugger-autorun', 'bool', false, false],
     sslCertificatesPath : ['ssl-certificates-path', 'path', '', false],
-    sslProtocol : ['ssl-protocol', 'sslproto', -1, true]
+    sslProtocol : ['ssl-protocol', 'sslproto', -1, true],
+    userAgent : ['user-agent', 'string', defaultUA, true],
+    viewportWidth : ['viewport-width', 'int', 400, true],
+    viewportHeight : ['viewport-height', 'int', 300, true]
 };
 
 var slConfiguration = {
@@ -157,6 +175,17 @@ var slConfiguration = {
                 this[opt] = defaultValue;
         }
 
+        let jsConsole = cmdline.handleFlag("jsconsole", false);
+        if (jsConsole) {
+            let { XulApp } = Cu.import("resource://slimerjs/addon-sdk/xul-app.jsm", {});
+            if (XulApp.satisfiesVersion(XulApp.platformVersion, '>=50.0')) {
+                dump(
+                    'Warning: jsconsole parameter does not work when using Firefox 50+ because the Error Console has ' +
+                    'been removed from the Firefox toolkit package so it is no longer available for XUL apps.' + "\n"
+                );
+            }
+        }
+
         let configFile = cmdline.handleFlagWithParam("config", false);
         if (configFile) {
             this.handleConfigFile(configFile);
@@ -221,9 +250,12 @@ var slConfiguration = {
                 }
                 break;
             case 'config-url':
-                if (this.proxy.startsWith('http://') || this.proxy.startsWith('file://')) {
+                if (this.proxy.startsWith('http://') ||
+                    this.proxy.startsWith('https://') ||
+                    this.proxy.startsWith('file://')
+                ) {
                     Services.prefs.setIntPref('network.proxy.type',2);
-                    Services.prefs.setCharPref('network.proxy.autoconfig_url', this.proxy)
+                    Services.prefs.setCharPref('network.proxy.autoconfig_url', this.proxy);
                 }
                 break;
             case '':
@@ -254,6 +286,10 @@ var slConfiguration = {
         throw new Error("Invalid value for '"+cmdlineOpt+"' option. It should be yes or no");
     },
 
+    parse_string : function (val, cmdlineOpt) {
+        return val;
+    },
+
     parse_file : function (val, cmdlineOpt) {
         // @TODO check if file exists ?
         return val;
@@ -273,19 +309,22 @@ var slConfiguration = {
     },
 
     parse_proxyauth : function (val, cmdlineOpt) {
-        let pos = val.lastIndexOf(':')
+        let pos = val.indexOf(':');
         if ( pos > 0) {
-            [this.proxyAuthUser, this.proxyAuthPassword] = val.split(":");
+            this.proxyAuthUser = val.substring(0, pos);
+            this.proxyAuthPassword = val.substring(pos+1);
         }
-        else
-            this.proxyAuthUser = val
+        else {
+            this.proxyAuthUser = val;
+        }
         return val;
     },
 
     parse_proxy : function (val, cmdlineOpt) {
         let pos = val.lastIndexOf(':')
         if ( pos > 0) {
-            [this.proxyHost, this.proxyPort] = val.split(":");
+            this.proxyHost = val.substring(0, pos);
+            this.proxyPort = val.substring(pos+1);
         }
         else {
             this.proxyHost = val;
@@ -379,8 +418,8 @@ var slConfiguration = {
     },
 
     getDefaultWebpageConfig : function() {
-        
         return Object.freeze({
+            allowMedia: this.allowMedia,
             javascriptEnabled: true,
             loadImages: this.loadImages,
             localToRemoteUrlAccessEnabled: this.localToRemoteUrlAccessEnabled,
@@ -388,12 +427,19 @@ var slConfiguration = {
             webSecurityEnabled: this.webSecurityEnabled,
             javascriptCanOpenWindows: this.javascriptCanOpenWindows,
             javascriptCanCloseWindows: this.javascriptCanCloseWindows,
-            userAgent: defaultUA,
+            userAgent: this.userAgent,
             userName: undefined,
             password: undefined,
             maxAuthAttempts: undefined,
             resourceTimeout: undefined,
             plainTextAllContent: false
+        })
+    },
+
+    getDefaultViewportSize : function() {
+        return Object.freeze({
+            width: this.viewportWidth,
+            height: this.viewportHeight
         })
     },
 
@@ -419,6 +465,7 @@ var slConfiguration = {
             slDebugLog('Configuration: workingDirectory=unknown??');
     },
 
+    allowMedia: true,
     errorLogFile : '',
     cookiesFile : '',
     diskCacheEnabled : true,
@@ -443,6 +490,9 @@ var slConfiguration = {
     javascriptCanCloseWindows : true,
     sslCertificatesPath : null,
     enableCoffeeScript: true,
-    sslProtocol: -1
+    sslProtocol: -1,
+    userAgent: defaultUA,
+    viewportWidth: 400,
+    viewportHeight: 300,
+    isWindows: /windows/i.test(httphandler.oscpu)
 }
-

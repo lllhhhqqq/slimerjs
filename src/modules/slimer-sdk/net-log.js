@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 "use strict";
 
-const {Cc, Ci, Cr, Cu} = require("chrome");
+const {Cc, Ci, Cr, Cu, CC} = require("chrome");
 const {mix} = require("sdk/core/heritage");
 const unload = require("sdk/system/unload");
 
@@ -11,11 +11,31 @@ const observers = require("sdk/deprecated/observer-service");
 
 const imgTools = Cc["@mozilla.org/image/tools;1"].getService(Ci.imgITools);
 const ioService = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
+const { TYPE_ONE_SHOT, TYPE_REPEATING_SLACK } = Ci.nsITimer;
+const Timer = CC('@mozilla.org/timer;1', 'nsITimer');
 
 Cu.import('resource://slimerjs/slDebug.jsm');
 Cu.import("resource://gre/modules/Services.jsm");
 
 let browserMap = new WeakMap();
+
+const NS_ERROR_UCONV_NOCONV = 0x80500001;
+
+var unicodeConverter = null;
+
+function convertToUnicode (text, charset) {
+    if (null === unicodeConverter) {
+        unicodeConverter = Cc["@mozilla.org/intl/scriptableunicodeconverter"]
+                            .createInstance(Ci.nsIScriptableUnicodeConverter);
+    }
+
+    if (charset) {
+        unicodeConverter.charset = charset;
+    }
+
+    return unicodeConverter.ConvertToUnicode(text);
+}
+
 
 /**
  * Register network callbacks on the given browser
@@ -33,7 +53,7 @@ exports.registerBrowser = function(browser, options) {
             _onRequest: null,
 
             // Mime types to capture (regexp array)
-            captureTypes: [],
+            getCaptureTypes: null,
 
 
             // --- callbacks for the main document,
@@ -80,8 +100,11 @@ exports.registerBrowser = function(browser, options) {
             // Receives the URI, "success" or "fail", the associated window object, and a
             // boolean indicating if it is during the load of the main document (true) or
             // not.
-            onFrameLoadFinished: null
+            onFrameLoadFinished: null,
 
+            // called during loading progress
+            // Receives the URI, aCurSelfProgress, aMaxSelfProgress, aCurTotalProgress, aMaxTotalProgress
+            onProgressChange: null
         }, options || {}),
         requestList: [],
         progressListener: null
@@ -136,11 +159,12 @@ exports.stopTracer = stopTracer;
  * @param string data
  */
 const onRequestStart = function(subject, data) {
-
     let browser = getBrowserForRequest(subject);
     if (!browser || !browserMap.has(browser)) {
         return;
     }
+
+    let resourceTimeout = browser.webpage.settings.resourceTimeout;
     let {options, requestList} = browserMap.get(browser);
     requestList.push(subject.name);
     let index = requestList.length;
@@ -153,6 +177,11 @@ const onRequestStart = function(subject, data) {
 
     if (DEBUG_NETWORK_PROGRESS) {
         slDebugLog("network: resource request #"+req.id+" started: "+req.method+" - "+req.url+" flags="+loadFlags(subject));
+        // normal document (html or unsupported file): DOCUMENT_URI, INITIAL_DOCUMENT_URI
+        // document resources (img, css, js...): nothing
+        // iframe document: DOCUMENT_URI 
+        // the url will be redirected: DOCUMENT_URI, INITIAL_DOCUMENT_URI
+        // on new url after redirection: DOCUMENT_URI, REPLACE, INITIAL_DOCUMENT_URI
     }
 
     if (typeof(options.onRequest) === "function") {
@@ -166,11 +195,16 @@ const onRequestStart = function(subject, data) {
         }
 
         if (typeof(options.onError) === "function") {
-            options.onError({id: req.id, url: req.url, errorCode:code, errorString:msg});
+            options.onError({id: req.id,
+                            url: req.url,
+                            errorCode:code,
+                            errorString:msg,
+                            status: null,
+                            statusText: null});
         }
     }
 
-    let listener = new TracingListener(index, options, subject);
+    let listener = new TracingListener(index, options, subject, req, resourceTimeout);
     subject.QueryInterface(Ci.nsITraceableChannel);
     listener.originalListener = subject.setNewListener(listener);
 };
@@ -202,12 +236,10 @@ const onFileRequestResponse = function(subject, browser) {
     // Get request ID
     let index;
     let {options, requestList} = browserMap.get(browser);
-    requestList = requestList.map(function(val, i) {
+    requestList.forEach(function(val, i) {
         if (subject.name == val) {
             index = i + 1;
-            return val;
         }
-        return val;
     });
 
     let response = {
@@ -225,6 +257,7 @@ const onFileRequestResponse = function(subject, browser) {
 
         // Extensions
         referrer: "",
+        isFileDownloading : !! (subject.loadFlags & Ci.nsIChannel.LOAD_RETARGETED_DOCUMENT_URI),
         body: ""
     };
     if (typeof(options.onResponse) == "function") {
@@ -237,12 +270,10 @@ const onFileRequestResponseDone = function(subject, browser) {
     // Get request ID
     let index;
     let {options, requestList} = browserMap.get(browser);
-    requestList = requestList.map(function(val, i) {
+    requestList.forEach(function(val, i) {
         if (subject.name == val) {
             index = i + 1;
-            return val;
         }
-        return val;
     });
 
     let response = {
@@ -260,14 +291,16 @@ const onFileRequestResponseDone = function(subject, browser) {
 
         // Extensions
         referrer: "",
+        isFileDownloading : !! (subject.loadFlags & Ci.nsIChannel.LOAD_RETARGETED_DOCUMENT_URI),
         body: ""
     };
+
     if (typeof(options.onResponse) == "function") {
         options.onResponse(mix({}, response));
     }
 };
 
-const TracingListener = function(index, options, request) {
+const TracingListener = function(index, options, request, requestJs, timeout) {
     this.index = index;
     this.options = options;
     this.response = null;
@@ -275,9 +308,28 @@ const TracingListener = function(index, options, request) {
     this.data = [];
     this.dataLength = 0;
     this.originalRequest = request;
+    this.requestJs = requestJs;
+    this.timeout = timeout;
+    this.timer = null;
+    this.timerCallback = null;
+
+    // we don't use the Necko timeout feature because setting the pref
+    // network.http.response.timeout sets the timeout for all webpage,
+    // and we want the timeout only for the corresponding webpage object.
+    if (this.timeout) {
+        this.timerCallback = () => {
+            request.cancel(Cr.NS_ERROR_NET_TIMEOUT);
+            this.timer = null;
+        };
+        this.timer = Timer();
+        this.timer.initWithCallback({
+            notify: this.timerCallback
+        }, this.timeout, TYPE_ONE_SHOT);
+    }
 };
 TracingListener.prototype = {
     onStartRequest: function(request, context) {
+
         try {
             request.QueryInterface(Ci.nsIHttpChannel);
             this.originalListener.onStartRequest(request, context);
@@ -285,7 +337,13 @@ TracingListener.prototype = {
             //dump("netlog onStartRequest error: "+e+"\n")
         }
 
-        if (typeof(request.URI) === "undefined" ||!this._inWindow(request)) {
+        if (typeof(request.URI) === "undefined") {
+            return;
+        }
+
+        if (!this._inWindow(request) && ! request.loadFlags & Ci.nsIChannel.LOAD_RETARGETED_DOCUMENT_URI) {
+            // for request that is not in the window and that is not
+            // a download, ignore it
             return;
         }
 
@@ -302,10 +360,16 @@ TracingListener.prototype = {
             this.originalRequest = null;
             return;
         }
+
         this.response = traceResponse(this.index, request);
 
         if (DEBUG_NETWORK_PROGRESS) {
             slDebugLog("network: resource #"+this.response.id+" response 'start': "+this.response.url+" flags="+loadFlags(request));
+            //normal document: DOCUMENT_URI, INITIAL_DOCUMENT_URI, TARGETED
+            //downloaded document: DOCUMENT_URI, RETARGETED_DOCUMENT_URI, INITIAL_DOCUMENT_URI, TARGETED
+            //document resources (img, css, js...): nothing
+            //iframe document loading: DOCUMENT_URI, TARGETED
+            //on resource after redirection: DOCUMENT_URI, REPLACE, INITIAL_DOCUMENT_URI, TARGETED
         }
 
         if (request.status) {
@@ -313,8 +377,20 @@ TracingListener.prototype = {
             if (DEBUG_NETWORK_PROGRESS) {
                 slDebugLog("network: resource #"+this.response.id+" response in error: #"+code+" - "+msg);
             }
-            if (typeof(this.options.onError) === "function")
-                this.options.onError({id: this.response.id, url: this.response.url, errorCode:code, errorString:msg});
+            if (typeof(this.options.onError) === "function") {
+                if (code == 4) {
+                    // let's mimic Phantomjs for timeout
+                    code = 5;
+                    msg = "Operation canceled";
+                }
+                this.options.onError({id: this.response.id,
+                                     url: this.response.url,
+                                     errorCode:code,
+                                     errorString:msg,
+                                     status: this.response.status,
+                                     statusText: this.response.statusText,
+                                     });
+            }
             this.errorAlreadyNotified = true;
         }
         else {
@@ -354,11 +430,15 @@ TracingListener.prototype = {
                     slDebugLog("network: resource #"+this.response.id+" response in error (2): #"+errorCode+" - "+errorStr);
                 }
 
-                if (typeof(this.options.onError) === "function")
+                if (typeof(this.options.onError) === "function") {
                     this.options.onError({id: this.response.id,
                                          url: this.response.url,
                                          errorCode:errorCode,
-                                         errorString:errorStr});
+                                         errorString:errorStr,
+                                         status: this.response.status,
+                                         statusText: this.response.statusText
+                                     });
+                }
                 this.errorAlreadyNotified = true;
             }
         }
@@ -374,7 +454,7 @@ TracingListener.prototype = {
                 this.dataLength += count;
                 let win = getWindowForRequest(request);
                 if (this._defragURL(win.location) == request.URI.spec ||
-                    /^image\//.test(request.contentType) ||
+                    /^image\//.test(request.contentType) || // get data for image to retrieve image information
                     this._shouldCapture(request))
                 {
                     let [data, newIS] = this._captureData(inputStream, count);
@@ -391,19 +471,45 @@ TracingListener.prototype = {
             } catch(e) {
             }
         }
+        if (this.timeout) {
+            if (this.timer) {
+                this.timer.cancel();
+            }
+            this.timer = Timer();
+            this.timer.initWithCallback({
+                notify: this.timerCallback
+            }, this.timeout, TYPE_ONE_SHOT);
+        }
     },
     onStopRequest: function(request, context, statusCode) {
 
-        this.originalListener.onStopRequest(request, context, statusCode);
+        if (this.timer) {
+            this.timer.cancel();
+            this.timer = null;
+            this.timerCallback = null;
+        }
+        try {
+            this.originalListener.onStopRequest(request, context, statusCode);
+        } catch(e) {
+            // loading may be aborted, so invalid request. let's do nothing in this case...
+            return;
+        }
         request = request.QueryInterface(Ci.nsIHttpChannel);
-        if (typeof(request.URI) === "undefined" || !this._inWindow(request) || !this.originalRequest) {
+        let isFromWindow = this._inWindow(request);
+        let isFileDownloaded = !isFromWindow && (request.loadFlags & Ci.nsIChannel.LOAD_RETARGETED_DOCUMENT_URI);
+        if (typeof(request.URI) === "undefined" ||
+            !this.originalRequest ||
+            (!isFromWindow  && ! isFileDownloaded)
+            ) {
             this.data = [];
             return;
         }
 
         // browser could have been removed during request
+        // or for file downloading, there are no browser
         let browser = getBrowserForRequest(request);
-        if (!browserMap.has(browser)) {
+        if ((!browser || !browserMap.has(browser)) && !isFileDownloaded && DEBUG_NETWORK_PROGRESS) {
+            slDebugLog("network: resource #"+this.response.id+" response -> NO BROWSER IN MAP");
             return;
         }
 
@@ -413,10 +519,26 @@ TracingListener.prototype = {
         if (request.status) {
             let [code, msg] = getErrorCode(request.status);
             if (DEBUG_NETWORK_PROGRESS) {
-                slDebugLog("network: resource #"+this.response.id+" response in error: "+code+" - "+msg);
+                slDebugLog("network: resource #"+this.response.id+" response in error (3): "+code+" - "+msg);
             }
-            if (!this.errorAlreadyNotified && typeof(this.options.onError) === "function") {
-                this.options.onError({id: this.response.id, url: this.response.url, errorCode:code, errorString:msg});
+            if (code == 4) {
+                this.options.onTimeout({id: this.response.id,
+                                        method: this.requestJs.method,
+                                        url: this.response.url,
+                                        time: this.requestJs.date,
+                                        headers: this.requestJs.headers,
+                                        errorCode:408,
+                                        errorString:"Network timeout on resource."
+                                    });
+            }
+            else if (!this.errorAlreadyNotified && typeof(this.options.onError) === "function") {
+                this.options.onError({id: this.response.id,
+                                     url: this.response.url,
+                                     errorCode:code,
+                                     errorString:msg,
+                                     status: this.response.status,
+                                     statusText: this.response.statusText,
+                                     });
             }
             this.errorAlreadyNotified = false;
         }
@@ -431,14 +553,19 @@ TracingListener.prototype = {
     },
 
     _shouldCapture: function(request) {
-        if (!Array.isArray(this.options.captureTypes)) {
+        if (!this.options.getCaptureTypes) {
             return false;
         }
-
-        return this.options.captureTypes.some(function(value) {
+        let captureTypes = this.options.getCaptureTypes();
+        if (!Array.isArray(captureTypes)) {
+            return false;
+        }
+        return captureTypes.some(function(value) {
             try {
-                return value.test(request.contentType);
-            } catch(e) {}
+                let r = value.test(request.contentType);
+                return r;
+            } catch(e) {
+            }
             return false;
         });
     },
@@ -475,7 +602,6 @@ TracingListener.prototype = {
         this.response.time = new Date();
         this.response.body = this.data.join("");
         this.response.bodySize = this.dataLength;
-
         if (this.response.redirectURL) {
             this.response.body = "";
             this.response.bodySize = 0;
@@ -486,11 +612,27 @@ TracingListener.prototype = {
                 this.response.imageInfo = imageInfo(this.response, this.response.body);
             }
             if (!this._shouldCapture(request) &&
-                this._defragURL(browser.contentWindow.location) != request.URI.spec)
-            {
+                !(browser && this._defragURL(browser.contentWindow.location) == request.URI.spec)) {
                 this.response.body = "";
             }
         }
+
+        if (this.response.body && this.response.contentCharset) {
+            try {
+                this.response.body = convertToUnicode(this.response.body, this.response.contentCharset);
+            } catch (e) {
+                if (DEBUG_NETWORK_PROGRESS) {
+                    var errorMessage = String(('object' === typeof e) ? e.message : e);
+
+                    if (e.message.indexOf('0x80500001') !== -1) {
+                        errorMessage = errorMessage.replace('0x80500001', '0x80500001 (NS_ERROR_UCONV_NOCONV)');
+                    }
+
+                    slDebugLog(errorMessage);
+                }
+            }
+        }
+
         this.data = [];
         this.options.onResponse(mix({}, this.response));
     },
@@ -521,7 +663,9 @@ const requestController = function(request, index, options, requestPhantom) {
                         id: index,
                         url: request.URI.spec,
                         errorCode: 95,
-                        errorString: "Resource loading aborted"
+                        errorString: "Resource loading aborted",
+                        status: null,
+                        statusText: null
                     });
             }
         },
@@ -566,7 +710,7 @@ const traceRequest = function(id, request) {
     };
 
     let stream = request.QueryInterface(Ci.nsIUploadChannel).uploadStream;
-    if (stream && (request.requestMethod == 'POST' || request.requestMethod == 'PUT')) {
+    if (stream && (request.requestMethod == 'POST' || request.requestMethod == 'PUT' || request.requestMethod == 'PATCH')) {
         try {
             // QueryInterface throw an exception if stream is not a seekable stream
             stream.QueryInterface(Ci.nsISeekableStream);
@@ -611,6 +755,7 @@ const traceResponse = function(id, request) {
             statusText: null,
             // Extensions
             referrer: "",
+            isFileDownloading: false,
             body: "",
             httpVersion: {
                 major: 1,
@@ -662,6 +807,7 @@ const traceResponse = function(id, request) {
 
     // Extensions
     response.referrer = request.referrer != null && request.referrer.spec || "";
+    response.isFileDownloading = !! (request.loadFlags & Ci.nsIChannel.LOAD_RETARGETED_DOCUMENT_URI);
     return response;
 };
 
@@ -842,6 +988,7 @@ ProgressListener.prototype = {
     onLocationChange : function(progress, request, location, flags) {
 
         if (flags & Ci.nsIWebProgressListener.LOCATION_CHANGE_ERROR_PAGE) {
+            //slDebugLog("network: LOCATION_CHANGE_ERROR_PAGE "+location.spec+" flags:"+debugFlags(flags));
             return;
         }
         if (typeof(this.options.onURLChanged) === "function"
@@ -853,9 +1000,10 @@ ProgressListener.prototype = {
     onStateChange: function(progress, request, flags, status) {
 
         if (!(request instanceof Ci.nsIChannel || "URI" in request)) {
-            // ignore requests that are not a channel/http channel
-            //if (DEBUG_NETWORK_PROGRESS)
-            //    slDebugLog("network: request not a http channel");
+            // ignore requests that are not a channel
+            //if (DEBUG_NETWORK_PROGRESS) {
+            //    slDebugLog("network: request not a http channel. status: "+getMozErrorName(status)+" flags:"+debugFlags(flags));
+            //}
             return
         }
         let uri = request.URI.spec;
@@ -864,8 +1012,9 @@ ProgressListener.prototype = {
 
         if (!this.isFromMainWindow(loadContext)) {
             // we receive a new status for a page that is loading in a frame
-            if (DEBUG_NETWORK_PROGRESS)
+            if (DEBUG_NETWORK_PROGRESS) {
                 slDebugLog("network: frame request "+uri+ " flags:"+debugFlags(flags));
+            }
 
             if (this.isLoadRequested(flags)) {
                 if (typeof(this.options.onFrameLoadStarted) === "function") {
@@ -888,8 +1037,9 @@ ProgressListener.prototype = {
         try {
             if (this.mainPageURI == null) {
                 if (this.isLoadRequested(flags)) {
-                    if (DEBUG_NETWORK_PROGRESS)
+                    if (DEBUG_NETWORK_PROGRESS) {
                         slDebugLog("network: main request starting - "+uri+ " flags:"+debugFlags(flags));
+                    }
                     this.mainPageURI = request.URI;
                     if (typeof(this.options.onLoadStarted) === "function") {
                         this.options.onLoadStarted(uri);
@@ -903,25 +1053,32 @@ ProgressListener.prototype = {
                 else if (this.isRedirectionStart(flags)) {
                     this.redirecting = false;
                     this.mainPageURI = request.URI;
-                    if (DEBUG_NETWORK_PROGRESS)
+                    if (DEBUG_NETWORK_PROGRESS) {
                         slDebugLog("network: redirection starting - "+uri+ " flags:"+debugFlags(flags));
+                    }
                 }
-                else if (DEBUG_NETWORK_PROGRESS)
+                else if (DEBUG_NETWORK_PROGRESS) {
                     slDebugLog("network: request ignored. main page uri not started yet - "+uri+ " flags:"+debugFlags(flags));
+                }
                 return;
             }
 
             // ignore all request that are not the main request
             if (!this.mainPageURI.equalsExceptRef(request.URI)) {
-                if (DEBUG_NETWORK_PROGRESS)
+                if (DEBUG_NETWORK_PROGRESS) {
                     slDebugLog("network: request ignored: "+uri+ " flags:"+debugFlags(flags));
+                }
                 return;
             }
 
-            if (DEBUG_NETWORK_PROGRESS)
+            if (DEBUG_NETWORK_PROGRESS) {
                 slDebugLog("network: main request "+uri+ " flags:"+debugFlags(flags));
+            }
 
             if (this.isStart(flags)) {
+                if (DEBUG_NETWORK_PROGRESS) {
+                    slDebugLog("network: main request: transfer started");
+                }
                 if (request.URI.scheme == 'file') {
                     // for file:// protocol, we don't have http-on-* events
                     // let's call options.onResponse...
@@ -934,6 +1091,10 @@ ProgressListener.prototype = {
             }
 
             if (this.isTransferDone(flags)) {
+                if (DEBUG_NETWORK_PROGRESS) {
+                    slDebugLog("network: main request: transfer done");
+                }
+
                 if (request.URI.scheme == 'file') {
                     // for file:// protocol, we don't have http-on-* events
                     // let's call options.onResponse...
@@ -946,10 +1107,15 @@ ProgressListener.prototype = {
             }
 
             if (this.isLoaded(flags)) {
+                if (DEBUG_NETWORK_PROGRESS) {
+                    slDebugLog("network: main request: is loaded");
+                }
+
                 this.mainPageURI = null;
                 if (typeof(this.options.onLoadFinished) === "function") {
                     let success = "success";
                     try {
+                        request.QueryInterface(Ci.nsIHttpChannel);
                         if (request.responseStatus == 204 || request.responseStatus == 205) {
                             success = 'fail';
                         }
@@ -971,12 +1137,18 @@ ProgressListener.prototype = {
                 this.redirecting = true;
                 this.mainPageURI = null;
                 request.QueryInterface(Ci.nsIHttpChannel);
-                if (DEBUG_NETWORK_PROGRESS)
+                if (DEBUG_NETWORK_PROGRESS) {
                     slDebugLog("network: main request redirect from "+request.name);
+                }
+                return;
+            }
+            if (DEBUG_NETWORK_PROGRESS) {
+                slDebugLog("network: main request: ignored state");
             }
         } catch(e) {
-            if (DEBUG_NETWORK_PROGRESS)
+            if (DEBUG_NETWORK_PROGRESS) {
                 slDebugLog("network: on state change error:"+e);
+            }
             console.exception(e);
         }
     },
@@ -985,37 +1157,64 @@ ProgressListener.prototype = {
             return;
         if (!(aRequest instanceof Ci.nsIChannel || "URI" in aRequest)) {
             // ignore requests that are not a channel/http channel
+            //slDebugLog("network: onStatusChange, request not a http channel. status: "+getMozErrorName(aStatus));
             return
         }
-        slDebugLog("network: status change for "+aRequest.URI.spec+ " : "+aMessage);
+        slDebugLog("network: status change for "+aRequest.URI.spec+ " ("+aStatus+"): "+aMessage);
     },
     onSecurityChange : function(aWebProgress, aRequest, aState) {
         if (!DEBUG_NETWORK_PROGRESS)
             return;
         if (!(aRequest instanceof Ci.nsIChannel || "URI" in aRequest)) {
             // ignore requests that are not a channel/http channel
+            //slDebugLog("network: onSecurityChange, request not a http channel. status: "+debugSecurityFlags(aState));
             return
         }
-        slDebugLog("network: security change for "+aRequest.URI.spec+ " : "+debugSecurityFlags(flags));
+        slDebugLog("network: security change for "+aRequest.URI.spec+ " : "+debugSecurityFlags(aState));
     },
     debug : function(aWebProgress, aRequest) {},
     onProgressChange : function (aWebProgress, aRequest,
             aCurSelfProgress, aMaxSelfProgress,
             aCurTotalProgress, aMaxTotalProgress) {
-        if (!DEBUG_NETWORK_PROGRESS)
-            return;
         if (!(aRequest instanceof Ci.nsIChannel || "URI" in aRequest)) {
             // ignore requests that are not a channel/http channel
             return
         }
+        if (typeof(this.options.onProgressChange) === "function") {
+            this.options.onProgressChange(aRequest.URI.spec, aCurSelfProgress, aMaxSelfProgress,
+                                          aCurTotalProgress, aMaxTotalProgress);
+        }
+        if (!DEBUG_NETWORK_PROGRESS)
+            return;
         slDebugLog("network: progress total:"+aCurTotalProgress+"/"+aMaxTotalProgress+"; uri: "+aCurSelfProgress+"/"+aCurTotalProgress+" for "+aRequest.URI.spec);
     }
 };
 
 
+function getMozErrorName(status) {
+    let statusStr = status;
+    for (let err in Cr) {
+        if (typeof Cr[err]  ==  'number' && Cr[err] == status) {
+            statusStr = err;
+            break;
+        }
+    }
+    return statusStr;
+}
+
 function getErrorCode(status) {
     let errorCode = 99;
-    let errorString = 'an unknown network-related error was detected ('+status+')'; //for network error, base is: 0x804b0000
+    let errorString = 'an unknown network-related error was detected'; //for network error, base is: 0x804b0000
+    let statusStr = status;
+
+    for (let err in Cr) {
+        if (typeof Cr[err]  ==  'number' && Cr[err] == status) {
+            statusStr = err;
+            break;
+        }
+    }
+    errorString += " ("+statusStr+")";
+
     // see http://mxr.mozilla.org/mozilla-release/source/xpcom/base/ErrorList.h#118  for Gecko codes
     switch (status) {
         case Cr.NS_ERROR_MALFORMED_URI:        errorCode= 399 ;  errorString="The URI is malformed"; break;
@@ -1023,12 +1222,16 @@ function getErrorCode(status) {
         case Cr.NS_ERROR_NET_TIMEOUT:          errorCode= 4;   errorString="the connection to the remote server timed out"; break;
         case Cr.NS_ERROR_OFFLINE:              errorCode= 97;  errorString="The requested action could not be completed in the offline state"; break;
         case Cr.NS_ERROR_NO_CONTENT:           errorCode= 298; errorString="Channel opened successfully but no data will be returned"; break;
+        case Cr.NS_ERROR_NET_PARTIAL_TRANSFER: errorCode= 298 ; errorString="A transfer was only partially done when it completed"; break;
         case Cr.NS_ERROR_ALREADY_CONNECTED:
         case Cr.NS_ERROR_NOT_CONNECTED:
         case Cr.NS_ERROR_ALREADY_OPENED:
         case Cr.NS_ERROR_DNS_LOOKUP_QUEUE_FULL:
         case Cr.NS_ERROR_UNKNOWN_SOCKET_TYPE:
         case Cr.NS_ERROR_INSUFFICIENT_DOMAIN_LEVELS:
+        case Cr.NS_ERROR_SOCKET_ADDRESS_NOT_SUPPORTED:
+        case Cr.NS_ERROR_SOCKET_ADDRESS_IN_USE:
+        //case Cr.NS_ERROR_INTERCEPTION_FAILED:
         case Cr.NS_ERROR_SOCKET_CREATE_FAILED: errorCode=8 ;   errorString="The connection was broken due to disconnection from the network or failure to start the network"; break;
         case Cr.NS_ERROR_UNKNOWN_PROTOCOL:     errorCode= 301; errorString="The URI scheme corresponds to an unknown protocol handler"; break;
         case Cr.NS_ERROR_PORT_ACCESS_NOT_ALLOWED: errorCode= 96; errorString="Establishing a connection to an unsafe or otherwise banned port was prohibited"; break;
@@ -1067,9 +1270,14 @@ function getErrorCode(status) {
             errorString="The request has been aborted"; break
         case Cr.NS_BINDING_REDIRECTED:
             errorString="The request has been aborted by a redirection"; break
+        case Cr.NS_BINDING_RETARGETED:
+            errorString="The request has been retargeted"; break
+        case Cr.NS_ERROR_LOAD_SHOWED_ERRORPAGE:
+            errorString = "The request resulted in an error page being displayed"; break;
     }
     return [errorCode, errorString];
 }
+
 
 
 

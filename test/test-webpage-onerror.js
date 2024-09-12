@@ -33,21 +33,23 @@ describe("WebPage.onError", function(){
         waitsFor(function(){ return loaded;}, 1000);
 
         runs(function(){
-            expect(errorMessage).toEqual("[JavaScript Error: \"Error: error on click\" {file: \"http://127.0.0.1:8083/onerror.html\" line: 8}]");
-            expect(errorStack.length).toEqual(1)
+            expect(errorMessage).toEqual("Error: error on click");
+            expect(errorStack.length).toEqual(11)
             expect(errorStack[0].file).toEqual("http://127.0.0.1:8083/onerror.html")
             expect(errorStack[0].line).toEqual(8)
-            if (slimer.geckoVersion.major > 32) {
+            if (slimer.geckoVersion.major > 43) {
+                expect(errorStack[0].column).toEqual(23)
+            }
+            else if (slimer.geckoVersion.major > 32) {
                 expect(errorStack[0].column).toEqual(22)
             }
             else if (slimer.geckoVersion.major > 30) {
                 expect(errorStack[0].column).toEqual(16)
             }
-            //expect(errorStack[0]["function"]).toEqual("doError")
-            expect(errorStack[0]["function"]).toEqual(null)
-            //expect(errorStack[1].file).toEqual("http://127.0.0.1:8083/onerror.html")
-            //expect(errorStack[1].line).toEqual(15)
-            //expect(errorStack[1]["function"]).toEqual("onclick")
+            expect(errorStack[0]["function"]).toEqual("doError")
+            expect(errorStack[1].file).toEqual("http://127.0.0.1:8083/onerror.html")
+            expect(errorStack[1].line).toEqual(1)
+            expect(errorStack[1]["function"]).toEqual("onclick")
         });
     });
 
@@ -92,7 +94,12 @@ describe("WebPage.onError", function(){
                 expect(errorStack[2]["function"]).toEqual("")
             }
 
-            if (slimer.geckoVersion.major > 32) {
+            if (slimer.geckoVersion.major > 43) {
+                expect(errorStack[0].column).toEqual(23)
+                expect(errorStack[1].column).toEqual(23)
+                expect(errorStack[2].column).toEqual(2)
+            }
+            else if (slimer.geckoVersion.major > 32) {
                 expect(errorStack[0].column).toEqual(22)
                 expect(errorStack[1].column).toEqual(23)
                 expect(errorStack[2].column).toEqual(1)
@@ -119,7 +126,12 @@ describe("WebPage.onError", function(){
                 expect(errorStack[2].line).toEqual(1)
                 expect(errorStack[2]["function"]).toEqual("")
             }
-            if (slimer.geckoVersion.major > 32) {
+            if (slimer.geckoVersion.major > 43) {
+                expect(errorStack[0].column).toEqual(19)
+                expect(errorStack[1].column).toEqual(19)
+                expect(errorStack[2].column).toEqual(2)
+            }
+            else if (slimer.geckoVersion.major > 32) {
                 expect(errorStack[0].column).toEqual(18)
                 expect(errorStack[1].column).toEqual(19)
                 expect(errorStack[2].column).toEqual(2)
@@ -146,7 +158,12 @@ describe("WebPage.onError", function(){
                 expect(errorStack[2].line).toEqual(5)
                 expect(errorStack[2]["function"]).toEqual("")
             }
-            if (slimer.geckoVersion.major > 32) {
+            if (slimer.geckoVersion.major > 43) {
+                expect(errorStack[0].column).toEqual(11)
+                expect(errorStack[1].column).toEqual(11)
+                expect(errorStack[2].column).toEqual(1)
+            }
+            else if (slimer.geckoVersion.major > 32) {
                 expect(errorStack[0].column).toEqual(10)
                 expect(errorStack[1].column).toEqual(11)
                 expect(errorStack[2].column).toEqual(1)
@@ -180,15 +197,14 @@ describe("WebPage.onError", function(){
         waitsFor(function(){ return loaded;}, 1000);
 
         runs(function(){
-            expect(errorMessage).toEqual('[JavaScript Error: "Error: error from doerror.js" {file: "http://127.0.0.1:8083/doerror.js" line: 2}]');
-            expect(errorStack.length).toEqual(1)
+            expect(errorMessage).toEqual('Error: error from doerror.js');
+            expect(errorStack.length).toEqual(3)
             expect(errorStack[0].file).toEqual("http://127.0.0.1:8083/doerror.js")
             expect(errorStack[0].line).toEqual(2)
-            //expect(errorStack[0]["function"]).toEqual("arrrrrg")
-            expect(errorStack[0]["function"]).toEqual(null)
-            //expect(errorStack[1].file).toEqual("http://127.0.0.1:8083/doerror.js")
-            //expect(errorStack[1].line).toEqual(5)
-            //expect(errorStack[1]["function"]).toEqual("")
+            expect(errorStack[0]["function"]).toEqual("arrrrrg")
+            expect(errorStack[1].file).toEqual("http://127.0.0.1:8083/doerror.js")
+            expect(errorStack[1].line).toEqual(5)
+            expect(errorStack[1]["function"]).toEqual("")
 
             webpage.close();
         });
@@ -213,7 +229,7 @@ describe("WebPage.onError", function(){
         waitsFor(function(){ return loaded;}, 1000);
 
         runs(function(){
-            expect(errorMessage).toEqual("[JavaScript Error: \"TypeError: \"test\".match(...) is null\" {file: \"http://127.0.0.1:8083/typeerror.html\" line: 6}]");
+            expect(errorMessage).toEqual("TypeError: \"test\".match(...) is null");
             expect(errorStack.length).toEqual(1)
             expect(errorStack[0].file).toEqual("http://127.0.0.1:8083/typeerror.html");
             expect(errorStack[0].line).toEqual(6);

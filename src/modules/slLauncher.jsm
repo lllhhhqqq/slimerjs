@@ -27,6 +27,11 @@ const appInfo = Cc["@mozilla.org/xre/app-info;1"]
 const versionComparator = Cc["@mozilla.org/xpcom/version-comparator;1"]
                           .getService(Ci.nsIVersionComparator);
 
+// to avoid Reference Error when running long time Script. Fx52. see issue #590
+let debugService = Cc["@mozilla.org/dom/slow-script-debug;1"]
+    .getService(Ci.nsISlowScriptDebug);
+debugService.activationHandler = null;
+
 /**
  * this function retrieves various informations
  * about the main script. These informations will
@@ -86,7 +91,7 @@ var slLauncher = {
         mainWindow = contentWindow;
 
         let principal = contentWindow.document.nodePrincipal;
-        if (Services.appinfo.platformVersion.split('.')[0] > 20) {
+        if (geckoMajorVersion > 20 && geckoMajorVersion < 50) {
             // autorize the main script to use navigator.mozTCPSocket  https://developer.mozilla.org/en-US/docs/WebAPI/TCP_Socket
             Services.perms.addFromPrincipal(principal, "tcp-socket", Ci.nsIPermissionManager.ALLOW_ACTION);
             // FIXME: do other authorization: video, audio, geoloc...?
@@ -97,7 +102,7 @@ var slLauncher = {
             coffeeScriptSandbox = Cu.Sandbox(contentWindow,
                                 {
                                     sandboxName: 'coffeescript',
-                                    // XULrunner 40.0 and above handles sandboxPrototype different then before
+                                    // Firefox 40.0 and above handles sandboxPrototype different then before
                                     sandboxPrototype: versionComparator.compare(appInfo.platformVersion, '40') < 0 ? {} : contentWindow,
                                     wantXrays: true
                                 });
@@ -195,12 +200,7 @@ var slLauncher = {
     closeBrowser: function (browser) {
         let win = browser.ownerDocument.defaultView.top;
         win.close();
-    },
-
-    /**
-     * boolean to indicate if SlimerJS is in a closing process. Set by slimer.exit() and phantom.exit()
-     */
-    slimerExiting : false
+    }
 }
 
 /**
@@ -237,7 +237,7 @@ const nativeModules = {
     'webpage': '@slimer-sdk/webpage',
     'net-log' : '@slimer-sdk/net-log',
     'webserver' : 'webserver',
-    'system' : 'system',
+    'system' : '@slimer-sdk/system',
     'chrome': 'chrome',
     'vm':'@slimer-sdk/vm',
     'path':'@slimer-sdk/path',
@@ -248,8 +248,7 @@ const nativeMapping = {
     '@slimer-sdk/': 'resource://slimerjs/slimer-sdk/',
     '@loader/': 'resource://slimerjs/@loader',
     'chrome': 'resource://slimerjs/@chrome',
-    'webserver' : 'resource://slimerjs/webserver.jsm',
-    'system' : 'resource://slimerjs/system.jsm'
+    'webserver' : 'resource://slimerjs/slimer-sdk/webserver.jsm'
 }
 
 
@@ -289,7 +288,7 @@ function prepareLoader(scriptInfo) {
     }
 
     // path where to search each time require() is called. Filled during resolution of the module name
-    var additionnalPaths = [];
+    var additionalPaths = [];
 
     // list of extensions and their compiler
     var extensions = {
@@ -305,8 +304,14 @@ function prepareLoader(scriptInfo) {
 
     function findFileExtension(id, baseFile) {
         let f = isFile(id, baseFile)
-        if (f)
-            return f;
+        if (f) {
+            if (f.isDirectory() && f.parent.leafName == 'node_modules') {
+                baseFile = f;
+            }
+            else {
+                return f;
+            }
+        }
         for(let ext in extensions) {
             f = isFile(id+ext, baseFile);
             if (f)
@@ -331,13 +336,12 @@ function prepareLoader(scriptInfo) {
             console: new slConsole()
         },
         modules: {
-          "webserver": Cu.import("resource://slimerjs/webserver.jsm", {}),
-          "system": Cu.import("resource://slimerjs/system.jsm", {}),
+          "webserver": Cu.import("resource://slimerjs/slimer-sdk/webserver.jsm", {})
         },
         // this function should return the true id of the module.
         // The returned id should be an id or an absolute path of a file
         resolve: function(id, requirer) {
-            additionnalPaths = [];
+            additionalPaths = [];
             let relativeId = false;
             if (id[0] == '.') {
                 relativeId = id;
@@ -366,8 +370,8 @@ function prepareLoader(scriptInfo) {
             //dump("resolve: "+id+ " relativeId:" +relativeId+"\n");
             if (relativeId === false && slUtils.isAbsolutePath(id)) {
                 // id is an absolute path
-                additionnalPaths.push(id);
-                //dump("additionnalPaths "+id+"\n");
+                additionalPaths.push(id);
+                //dump("additionalPaths "+id+"\n");
                 return id;
             }
 
@@ -376,8 +380,8 @@ function prepareLoader(scriptInfo) {
 
             if (relativeId !== false) {
                 // id is a relative path
-                additionnalPaths.push(requirerDir);
-                //dump("additionnalPaths requirerDir "+requirerDir.path+" parent of "+requirer.uri+"\n");
+                additionalPaths.push(requirerDir);
+                //dump("additionalPaths requirerDir "+requirerDir.path+" parent of "+requirer.uri+"\n");
             }
             else if (requirerDir) {
                 // let's add node_modules directories
@@ -385,12 +389,12 @@ function prepareLoader(scriptInfo) {
                 while(dir) {
                     let d = dir.clone();
                     d.append('node_modules');
-                    additionnalPaths.push(d);
+                    additionalPaths.push(d);
                     dir = dir.parent;
                 }
             }
 
-            additionnalPaths.push(scriptInfo.requirePath);
+            additionalPaths.push(scriptInfo.requirePath);
 
             // id is not an absolute path or relative path (ex: foo or foo/bar)
             // let's add all path of requirePaths to search inside them
@@ -400,10 +404,10 @@ function prepareLoader(scriptInfo) {
                 let path = requirePaths[i];
                 let dir;
                 if (path[0] == '.' || !slUtils.isAbsolutePath(path)) {
-                    additionnalPaths.push(slUtils.getAbsMozFile(path, requirerDir));
+                    additionalPaths.push(slUtils.getAbsMozFile(path, requirerDir));
                 }
                 else {
-                    additionnalPaths.push(slUtils.getMozFile(path));
+                    additionalPaths.push(slUtils.getMozFile(path));
                 }
             }
             if (relativeId) {
@@ -418,8 +422,8 @@ function prepareLoader(scriptInfo) {
                 return uri;
             }
 
-            for(let i=0; i < additionnalPaths.length; i++) {
-                let path = additionnalPaths[i];
+            for(let i=0; i < additionalPaths.length; i++) {
+                let path = additionalPaths[i];
                 if (typeof path == 'string') {
                     if (id === path) {
                         // id is an absolute path
@@ -477,8 +481,8 @@ function prepareLoader(scriptInfo) {
             });
 
             // let's define some object available in the sandbox
-            Cu.import('resource://slimerjs/slimer.jsm', sandbox);
-            Cu.import('resource://slimerjs/phantom.jsm', sandbox);
+            Cu.import('resource://slimerjs/slimer-sdk/slimer.jsm', sandbox);
+            Cu.import('resource://slimerjs/slimer-sdk/phantom.jsm', sandbox);
 
             let properties = {};
             fillDescriptor(globalProperties, properties)
